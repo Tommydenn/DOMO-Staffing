@@ -24,8 +24,8 @@ HGSA Staffing Efficiency Dashboard — visualizes staffing efficiency metrics fo
 
 ## Data
 - Primary dataflow: DF205 `DEV | RA Staffing Efficiency` (Magic ETL). Output dataset `995db646-e97e-41e8-b8fd-44f517904859`. Currently RA-only — being pivoted to all-staff.
-- Crosswalk dataset: `MAP | Employee Crosswalk` (`6adece01-4d8a-4a2c-be23-b3b33e05f897`) — built daily by `matcher/`.
-- Crosswalk decisions log: `MAP | Employee Crosswalk Decisions` (`6e9df3f9-ffa3-401d-bdcb-dc4d3e97de3e`) — appended by the Vercel review UI.
+- Crosswalk dataset: `MAP | Employee Crosswalk` (`42e99d29-460c-478e-ac8c-9898795f1ef3`) — built daily by `matcher/`. Auto-created via Domo OAuth (api.domo.com), NOT manual upload.
+- Crosswalk decisions log: `MAP | Employee Crosswalk Decisions` (`51b9ff14-2b40-4d9e-a19d-ddfc0e76a59a`) — appended by the Vercel review UI.
 - Always load the `domo-great-lakes` skill before any Domo API call or ETL edit.
 
 ## Domo integration
