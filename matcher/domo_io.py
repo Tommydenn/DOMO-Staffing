@@ -206,8 +206,10 @@ CROSSWALK_COLUMNS = [
     {"type": "STRING", "name": "adp_title"},
     {"type": "STRING", "name": "adp_department"},
     {"type": "STRING", "name": "adp_community"},
+    {"type": "DOUBLE", "name": "adp_ytd_hours"},
     {"type": "STRING", "name": "em_employee_id"},
     {"type": "STRING", "name": "em_name"},
+    {"type": "DOUBLE", "name": "em_ytd_services"},
     {"type": "STRING", "name": "candidates_json"},
     {"type": "DOUBLE", "name": "confidence"},
     {"type": "STRING", "name": "match_source"},
@@ -226,22 +228,50 @@ DECISIONS_COLUMNS = [
 ]
 
 
-def fetch_adp_workers(client: DomoClient, dataset_id: str, days: int = 90) -> list[dict]:
-    """Distinct ADP associates with name + most-frequent community in the window."""
+def _year_start_iso() -> str:
+    """First day of the current year, ISO format — used to scope YTD queries."""
+    from datetime import date as _date
+    return f"{_date.today().year}-01-01"
+
+
+def fetch_adp_workers(client: DomoClient, dataset_id: str) -> list[dict]:
+    """Distinct ADP associates who punched in YTD, with name + community + YTD hours.
+
+    `Payroll Name` carries the actual "Last, First" string (`Employee Name` is empty).
+    YTD scope: only people who actually worked this year are considered.
+    """
+    year_start = _year_start_iso()
     sql = f"""
     SELECT
       `Associate ID` AS adp_associate_id,
       MAX(`Payroll Name`) AS adp_name,
       MAX(`Job Title Description`) AS adp_title,
       MAX(`Department Simplified`) AS adp_department,
-      MAX(`Community Name`) AS adp_community
+      MAX(`Community Name`) AS adp_community,
+      ROUND(SUM(COALESCE(CAST(`Hours` AS DOUBLE), 0)), 1) AS ytd_hours
     FROM table
-    WHERE `Timecard Date` >= DATE_ADD(CURRENT_DATE, -{int(days)})
+    WHERE `Timecard Date` >= '{year_start}'
       AND `Associate ID` IS NOT NULL
       AND `Payroll Name` IS NOT NULL AND `Payroll Name` != ''
     GROUP BY 1
+    HAVING SUM(COALESCE(CAST(`Hours` AS DOUBLE), 0)) > 0
     """
     return client.query(dataset_id, sql)
+
+
+def fetch_em_ytd_services(client: DomoClient, svc_dataset_id: str) -> dict[str, int]:
+    """Map em_employee_id -> count of YTD service rows confirmed by that employee."""
+    year_start = _year_start_iso()
+    sql = f"""
+    SELECT Employee_ID AS em_employee_id, COUNT(*) AS ytd_services
+    FROM table
+    WHERE Service_Date >= '{year_start}'
+      AND Employee_ID IS NOT NULL AND Employee_ID != ''
+      AND Minutes_of_Service_Actual > 0
+      AND (Canceled_Code IS NULL OR Canceled_Code = '')
+    GROUP BY 1
+    """
+    return {row["em_employee_id"]: int(row.get("ytd_services") or 0) for row in client.query(svc_dataset_id, sql)}
 
 
 def fetch_em_employees(client: DomoClient, dataset_id: str) -> list[dict]:

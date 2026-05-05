@@ -29,4 +29,8 @@ Thumbs.db
 # Runtime artifacts
 matcher/output/
 matcher/logs/
+matcher/df205_actions.json
 *.log
+
+# Claude Code session metadata
+.claude/

@@ -54,6 +54,7 @@ class AdpWorker:
     adp_title: str | None
     adp_department: str | None
     adp_community: str | None
+    ytd_hours: float = 0.0
     norm: str = ""
     last: str = ""
     first: str = ""
@@ -72,6 +73,7 @@ class EmEmployee:
     em_title: str | None
     em_community_id: str | None
     em_inactive: str | None
+    ytd_services: int = 0
     norm: str = ""
     last: str = ""
     first: str = ""
@@ -93,7 +95,8 @@ class MatchResult:
     em_name: str | None
     confidence: float  # 0..1
     match_source: str  # exact | fuzzy | llm | manual | unmatched
-    candidates: list[tuple[str, str, float]] = field(default_factory=list)  # for review
+    # Each candidate dict: {em_employee_id, em_name, score, ytd_services}
+    candidates: list[dict] = field(default_factory=list)
     notes: str = ""
 
 
@@ -123,8 +126,19 @@ def match_one(
             adp.adp_associate_id, adp.adp_name, e.em_employee_id, e.em_name, 1.0, "exact"
         )
     if len(exacts) > 1:
-        # exact name collision within the same community block — push to LLM
-        cands = [(e.em_employee_id, e.em_name, 1.0) for e in exacts]
+        # Exact-name collision: prefer the candidate with YTD service activity.
+        # If exactly one is active YTD, auto-confirm. Otherwise push to LLM.
+        active = [e for e in exacts if e.ytd_services > 0]
+        if len(active) == 1:
+            e = active[0]
+            return MatchResult(
+                adp.adp_associate_id, adp.adp_name, e.em_employee_id, e.em_name, 1.0, "exact",
+                notes=f"exact-name collision broken by YTD activity ({e.ytd_services} svc)",
+            )
+        cands = [
+            {"em_employee_id": e.em_employee_id, "em_name": e.em_name, "score": 1.0, "ytd_services": e.ytd_services}
+            for e in exacts
+        ]
         return MatchResult(
             adp.adp_associate_id,
             adp.adp_name,
@@ -151,7 +165,8 @@ def match_one(
             score -= 8
         scored.append((float(score), e))
 
-    scored.sort(key=lambda t: t[0], reverse=True)
+    # Sort: name score first, then YTD activity (active candidate wins ties)
+    scored.sort(key=lambda t: (t[0], t[1].ytd_services), reverse=True)
     top = scored[:5]
 
     if top and top[0][0] >= fuzzy_threshold and (len(top) == 1 or top[0][0] - top[1][0] >= 6):
@@ -166,7 +181,11 @@ def match_one(
         )
 
     if top and top[0][0] >= llm_lower_bound:
-        cands = [(e.em_employee_id, e.em_name, round(s / 100.0, 3)) for s, e in top]
+        cands = [
+            {"em_employee_id": e.em_employee_id, "em_name": e.em_name,
+             "score": round(s / 100.0, 3), "ytd_services": e.ytd_services}
+            for s, e in top
+        ]
         return MatchResult(
             adp.adp_associate_id,
             adp.adp_name,
