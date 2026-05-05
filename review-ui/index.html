@@ -178,8 +178,9 @@
       const tag = node.querySelector(".source-tag");
       tag.textContent = item.match_source;
       tag.className = `source-tag inline-block px-2 py-0.5 text-xs rounded ${SOURCE_PILL[item.match_source] || "bg-slate-100"}`;
-      const meta = [item.adp_title, item.adp_department, item.adp_community].filter(Boolean).join(" · ");
-      node.querySelector(".adp-meta").textContent = meta || "(no ADP context)";
+      const metaParts = [item.adp_title, item.adp_department, item.adp_community].filter(Boolean);
+      if (item.adp_ytd_hours) metaParts.push(`${item.adp_ytd_hours.toFixed(0)}h YTD`);
+      node.querySelector(".adp-meta").textContent = metaParts.join(" · ") || "(no ADP context)";
       node.querySelector(".adp-id").textContent = `ADP: ${item.adp_associate_id}`;
 
       const candsEl = node.querySelector(".candidates");
@@ -187,12 +188,27 @@
         node.querySelector(".cand-header").classList.add("hidden");
         node.querySelector(".no-cands").classList.remove("hidden");
       } else {
-        for (const c of item.candidates) {
+        // Sort: active candidates first (more YTD services); then by score
+        const sorted = [...item.candidates].sort((a, b) => {
+          const ay = Number(a.ytd_services || 0), by = Number(b.ytd_services || 0);
+          if (ay !== by) return by - ay;
+          return Number(b.score || 0) - Number(a.score || 0);
+        });
+        for (const c of sorted) {
           const btn = document.createElement("button");
-          btn.className = "w-full text-left border rounded px-3 py-2 text-sm hover:bg-emerald-50 hover:border-emerald-300";
+          const ytd = Number(c.ytd_services || 0);
+          const ytdCls = ytd > 0 ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-500";
+          const isStale = ytd === 0;
+          btn.className = `w-full text-left border rounded px-3 py-2 text-sm hover:bg-emerald-50 hover:border-emerald-300 ${isStale ? "opacity-60" : ""}`;
           btn.innerHTML = `<div class="flex items-baseline justify-between gap-3">
-            <div><span class="font-medium">${c.em_name || "—"}</span> <span class="text-xs text-slate-400 font-mono ml-2">${c.em_employee_id || ""}</span></div>
-            <span class="text-xs text-slate-500">${(Number(c.score || 0) * 100).toFixed(0)}%</span>
+            <div>
+              <span class="font-medium">${c.em_name || "—"}</span>
+              <span class="text-xs text-slate-400 font-mono ml-2">${c.em_employee_id || ""}</span>
+            </div>
+            <div class="flex gap-2 items-baseline">
+              <span class="text-xs px-1.5 py-0.5 rounded ${ytdCls}">${ytd.toLocaleString()} svc YTD</span>
+              <span class="text-xs text-slate-500">${(Number(c.score || 0) * 100).toFixed(0)}%</span>
+            </div>
           </div>`;
           btn.onclick = () => decide(item.adp_associate_id, c.em_employee_id, "confirmed", row);
           candsEl.appendChild(btn);

@@ -25,16 +25,35 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 def _load_workers_and_employees(client: domo_io.DomoClient):
-    adp_rows = domo_io.fetch_adp_workers(
-        client, os.environ["DATASET_ADP_PUNCHES"], days=90
-    )
+    adp_rows = domo_io.fetch_adp_workers(client, os.environ["DATASET_ADP_PUNCHES"])
     em_rows = domo_io.fetch_em_employees(client, os.environ["DATASET_EM_EMPLOYEES"])
-    adp_workers = [matcher.AdpWorker(**r) for r in adp_rows if r.get("adp_associate_id")]
-    em_employees = [matcher.EmEmployee(**r) for r in em_rows if r.get("em_employee_id")]
+    em_ytd = domo_io.fetch_em_ytd_services(client, os.environ["DATASET_EM_SVC_RECEIVED"])
+
+    def _coerce_float(v):
+        try: return float(v) if v is not None else 0.0
+        except (TypeError, ValueError): return 0.0
+
+    adp_workers = []
+    for r in adp_rows:
+        if not r.get("adp_associate_id"):
+            continue
+        r["ytd_hours"] = _coerce_float(r.get("ytd_hours"))
+        adp_workers.append(matcher.AdpWorker(**r))
+
+    em_employees = []
+    for r in em_rows:
+        if not r.get("em_employee_id"):
+            continue
+        r["ytd_services"] = int(em_ytd.get(r["em_employee_id"], 0))
+        em_employees.append(matcher.EmEmployee(**r))
+
     return adp_workers, em_employees
 
 
-def _resolve_pending_with_llm(results: list[matcher.MatchResult]) -> None:
+def _resolve_pending_with_llm(
+    results: list[matcher.MatchResult],
+    adp_workers_by_id: dict[str, "matcher.AdpWorker"],
+) -> None:
     """Mutates results in place: anything tagged llm-pending or ambiguous-exact gets a tiebreak."""
     pending = [r for r in results if r.match_source in ("llm-pending", "ambiguous-exact")]
     if not pending:
@@ -44,26 +63,24 @@ def _resolve_pending_with_llm(results: list[matcher.MatchResult]) -> None:
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     for r in pending:
-        cand_dicts = [
-            {"em_employee_id": cid, "em_name": cname, "score": cscore}
-            for cid, cname, cscore in r.candidates
-        ]
+        worker = adp_workers_by_id.get(r.adp_associate_id)
         try:
             decision = llm_tiebreak.decide(
                 adp_name=r.adp_name,
-                adp_title=None,
-                adp_community=None,
-                candidates=cand_dicts,
+                adp_title=worker.adp_title if worker else None,
+                adp_community=worker.adp_community if worker else None,
+                adp_ytd_hours=worker.ytd_hours if worker else 0.0,
+                candidates=r.candidates,
                 client=client,
             )
         except Exception as exc:
             r.notes = f"llm-error: {exc}"[:240]
             continue
         if decision.em_employee_id and decision.confidence >= 0.75:
-            chosen = next((c for c in r.candidates if c[0] == decision.em_employee_id), None)
+            chosen = next((c for c in r.candidates if c["em_employee_id"] == decision.em_employee_id), None)
             if chosen:
-                r.em_employee_id = chosen[0]
-                r.em_name = chosen[1]
+                r.em_employee_id = chosen["em_employee_id"]
+                r.em_name = chosen["em_name"]
                 r.confidence = decision.confidence
                 r.match_source = "llm"
                 r.notes = decision.rationale
@@ -85,8 +102,10 @@ def _build_crosswalk_rows(
         "adp_title",
         "adp_department",
         "adp_community",
+        "adp_ytd_hours",
         "em_employee_id",
         "em_name",
+        "em_ytd_services",
         "candidates_json",
         "confidence",
         "match_source",
@@ -99,10 +118,23 @@ def _build_crosswalk_rows(
     for r in results:
         unified = r.em_employee_id if r.em_employee_id else f"ADP:{r.adp_associate_id}"
         worker = by_id.get(r.adp_associate_id)
+        # Candidates are already dicts (see matcher.MatchResult); just normalise types
         cand_objs = [
-            {"em_employee_id": cid, "em_name": cname, "score": cscore}
-            for cid, cname, cscore in r.candidates
-        ] if r.candidates else []
+            {
+                "em_employee_id": str(c.get("em_employee_id", "")),
+                "em_name": str(c.get("em_name", "")),
+                "score": float(c.get("score", 0.0)),
+                "ytd_services": int(c.get("ytd_services", 0)),
+            }
+            for c in (r.candidates or [])
+        ]
+        # em_ytd_services for the chosen match: pull from the matching candidate if available
+        chosen_ytd = 0
+        if r.em_employee_id and cand_objs:
+            for c in cand_objs:
+                if c["em_employee_id"] == r.em_employee_id:
+                    chosen_ytd = c["ytd_services"]
+                    break
         rows.append({
             "unified_employee_id": unified,
             "adp_associate_id": r.adp_associate_id,
@@ -110,8 +142,10 @@ def _build_crosswalk_rows(
             "adp_title": (worker.adp_title or "") if worker else "",
             "adp_department": (worker.adp_department or "") if worker else "",
             "adp_community": (worker.adp_community or "") if worker else "",
+            "adp_ytd_hours": f"{(worker.ytd_hours if worker else 0.0):.1f}",
             "em_employee_id": r.em_employee_id or "",
             "em_name": r.em_name or "",
+            "em_ytd_services": str(chosen_ytd),
             "candidates_json": _json.dumps(cand_objs) if cand_objs else "",
             "confidence": f"{r.confidence:.3f}",
             "match_source": r.match_source,
@@ -145,11 +179,11 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
         fuzzy_threshold=int(os.environ.get("TIER2_FUZZY_THRESHOLD", "88")),
         llm_lower_bound=int(os.environ.get("TIER3_LLM_LOWER_BOUND", "75")),
     )
+    by_id = {w.adp_associate_id: w for w in adp_workers}
     if args.with_llm:
-        _resolve_pending_with_llm(results)
+        _resolve_pending_with_llm(results, by_id)
     _print_stats(results)
-
-    rows, columns = _build_crosswalk_rows(results, {w.adp_associate_id: w for w in adp_workers})
+    rows, columns = _build_crosswalk_rows(results, by_id)
     out_path = OUTPUT_DIR / f"crosswalk_dryrun_{date.today().isoformat()}.csv"
     pd.DataFrame(rows, columns=columns).to_csv(out_path, index=False)
     print(f"\nDry-run crosswalk written to {out_path}")
@@ -173,9 +207,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         fuzzy_threshold=int(os.environ.get("TIER2_FUZZY_THRESHOLD", "88")),
         llm_lower_bound=int(os.environ.get("TIER3_LLM_LOWER_BOUND", "75")),
     )
-    _resolve_pending_with_llm(results)
+    by_id = {w.adp_associate_id: w for w in adp_workers}
+    _resolve_pending_with_llm(results, by_id)
     _print_stats(results)
-    rows, columns = _build_crosswalk_rows(results, {w.adp_associate_id: w for w in adp_workers})
+    rows, columns = _build_crosswalk_rows(results, by_id)
     print(f"Uploading {len(rows)} rows to dataset {cw_id}...", file=sys.stderr)
     client.replace_dataset_csv(cw_id, rows, columns)
     print("Done.")

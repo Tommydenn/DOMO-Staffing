@@ -83,6 +83,7 @@ export default async function handler(req, res) {
         adp_title: row.adp_title || "",
         adp_department: row.adp_department || "",
         adp_community: row.adp_community || "",
+        adp_ytd_hours: Number(row.adp_ytd_hours || 0),
         match_source: row.match_source,
         candidates: parseCandidates(row.candidates_json),
         notes: row.notes || "",
