@@ -50,16 +50,39 @@ class DomoClient:
     def _bearer(self) -> str:
         if self._token and time.time() < self._token.expires_at - 60:
             return self._token.value
+        # Try the specific data scope; if Domo rejects with 400 (scope not granted to
+        # this client), retry without scope so the default client scopes apply.
+        scopes_to_try = ["data", None]
+        last_err: httpx.HTTPStatusError | None = None
         with httpx.Client(timeout=30.0) as client:
-            r = client.post(
-                f"{_API_BASE}/oauth/token",
-                params={"grant_type": "client_credentials", "scope": "data user"},
-                auth=(self._client_id, self._client_secret),
-            )
-            r.raise_for_status()
-            data = r.json()
-        self._token = _Token(value=data["access_token"], expires_at=time.time() + int(data["expires_in"]))
-        return self._token.value
+            for scope in scopes_to_try:
+                form: dict[str, str] = {"grant_type": "client_credentials"}
+                if scope:
+                    form["scope"] = scope
+                r = client.post(
+                    f"{_API_BASE}/oauth/token",
+                    data=form,
+                    auth=(self._client_id, self._client_secret),
+                    headers={"Accept": "application/json"},
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    self._token = _Token(
+                        value=data["access_token"],
+                        expires_at=time.time() + int(data.get("expires_in", 3600)),
+                    )
+                    return self._token.value
+                if r.status_code in (400, 401, 403):
+                    last_err = httpx.HTTPStatusError(
+                        f"OAuth token request failed (scope={scope!r}): "
+                        f"{r.status_code} {r.text[:300]}",
+                        request=r.request, response=r,
+                    )
+                    continue
+                r.raise_for_status()
+        if last_err:
+            raise last_err
+        raise RuntimeError("OAuth token request failed for unknown reason")
 
     def _headers(self, *, content_type: str = "application/json") -> dict[str, str]:
         return {
