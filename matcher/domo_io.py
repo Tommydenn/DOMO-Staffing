@@ -45,25 +45,53 @@ class DomoClient:
         rows = payload.get("rows", [])
         return [dict(zip(cols, row)) for row in rows]
 
+    def get_dataset_stream_id(self, dataset_id: str) -> int:
+        """Return the streamId associated with a dataset (needed for Streams API uploads)."""
+        url = f"https://{self.host}/api/data/v3/datasources/{dataset_id}"
+        with httpx.Client(timeout=60.0) as client:
+            r = client.get(url, headers=self._headers())
+            r.raise_for_status()
+        return int(r.json()["streamId"])
+
     def replace_dataset_csv(self, dataset_id: str, rows: list[dict], columns: list[str]) -> None:
-        """Overwrite a dataset's contents with a CSV body."""
+        """Overwrite a dataset's contents via the Streams API.
+
+        Three-step process:
+          1. POST executions -> get executionId
+          2. PUT part/1 with CSV body
+          3. PUT commit
+        """
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow({c: ("" if row.get(c) is None else row[c]) for c in columns})
-        body = buf.getvalue()
+        body = buf.getvalue().encode("utf-8")
 
-        url = f"https://{self.host}/api/data/v3/datasources/{dataset_id}/uploads"
-        upload_headers = {**self._headers(), "Content-Type": "text/csv"}
+        stream_id = self.get_dataset_stream_id(dataset_id)
+        base = f"https://{self.host}/api/data/v1/streams/{stream_id}/executions"
         with httpx.Client(timeout=300.0) as client:
-            r = client.put(
-                url,
-                headers=upload_headers,
-                content=body.encode("utf-8"),
-                params={"appendData": "false"},
-            )
+            r = client.post(base, headers=self._headers(), json={})
             r.raise_for_status()
+            execution_id = r.json()["executionId"]
+
+            try:
+                r = client.put(
+                    f"{base}/{execution_id}/part/1",
+                    headers={**self._headers(), "Content-Type": "text/csv"},
+                    content=body,
+                )
+                r.raise_for_status()
+
+                r = client.put(f"{base}/{execution_id}/commit", headers=self._headers())
+                r.raise_for_status()
+            except Exception:
+                # Best-effort abort so a failed execution doesn't sit in ACTIVE state
+                try:
+                    client.put(f"{base}/{execution_id}/abort", headers=self._headers())
+                except Exception:
+                    pass
+                raise
 
 
 def fetch_adp_workers(client: DomoClient, dataset_id: str, days: int = 90) -> list[dict]:
