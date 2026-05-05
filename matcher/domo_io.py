@@ -96,17 +96,18 @@ class DomoClient:
 
 def fetch_adp_workers(client: DomoClient, dataset_id: str, days: int = 90) -> list[dict]:
     """Distinct ADP associates with name + most-frequent community in the window."""
+    # `Payroll Name` carries the actual "Last, First" string. `Employee Name` is empty in this dataset.
     sql = f"""
     SELECT
       `Associate ID` AS adp_associate_id,
-      MAX(`Employee Name`) AS adp_name,
+      MAX(`Payroll Name`) AS adp_name,
       MAX(`Job Title Description`) AS adp_title,
       MAX(`Department Simplified`) AS adp_department,
       MAX(`Community Name`) AS adp_community
     FROM table
     WHERE `Timecard Date` >= DATE_ADD(CURRENT_DATE, -{int(days)})
       AND `Associate ID` IS NOT NULL
-      AND `Employee Name` IS NOT NULL AND `Employee Name` != ''
+      AND `Payroll Name` IS NOT NULL AND `Payroll Name` != ''
     GROUP BY 1
     """
     return client.query(dataset_id, sql)
