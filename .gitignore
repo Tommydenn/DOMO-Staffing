@@ -1,0 +1,32 @@
+# Secrets — NEVER commit
+.env
+.env.local
+*.env
+**/secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Node / Vercel
+node_modules/
+.next/
+.vercel/
+dist/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts
+matcher/output/
+matcher/logs/
+*.log

@@ -1,0 +1,2 @@
+unified_employee_id,adp_associate_id,adp_name,em_employee_id,em_name,confidence,match_source,verified_by,last_verified,notes
+__SEED__,__SEED__,Seed Row (delete after first matcher run),,,,seed,Tommy,2026-05-05,Schema-only seed row. The matcher will overwrite this dataset on its first run.

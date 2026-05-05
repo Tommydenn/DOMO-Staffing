@@ -1,0 +1,49 @@
+name: employee-crosswalk-matcher
+
+on:
+  schedule:
+    - cron: "0 8 * * *"  # daily at 08:00 UTC (~03:00 CT)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  match:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: matcher
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run matcher
+        working-directory: matcher
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DOMO_API_HOST: ${{ secrets.DOMO_API_HOST }}
+          DOMO_DEVELOPER_TOKEN: ${{ secrets.DOMO_DEVELOPER_TOKEN }}
+          DATASET_ADP_PUNCHES: ${{ secrets.DATASET_ADP_PUNCHES }}
+          DATASET_EM_EMPLOYEES: ${{ secrets.DATASET_EM_EMPLOYEES }}
+          DATASET_EM_SVC_RECEIVED: ${{ secrets.DATASET_EM_SVC_RECEIVED }}
+          DATASET_CROSSWALK: ${{ secrets.DATASET_CROSSWALK }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+        run: python -m matcher.main run
+
+      - name: Upload review queue artifact (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-queue
+          path: matcher/output/*.csv
+          if-no-files-found: ignore
+          retention-days: 14
