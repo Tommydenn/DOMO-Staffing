@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Employee Crosswalk Review</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-5xl mx-auto p-6">
+    <header class="mb-6 flex items-end justify-between">
+      <div>
+        <h1 class="text-2xl font-semibold">Employee Crosswalk Review</h1>
+        <p class="text-sm text-slate-600">Confirm or override matches that the matcher couldn't auto-resolve.</p>
+      </div>
+      <button id="refresh" class="px-3 py-2 rounded bg-slate-900 text-white text-sm">Refresh</button>
+    </header>
+
+    <div id="summary" class="mb-4 text-sm text-slate-600"></div>
+
+    <div id="rows" class="space-y-3"></div>
+  </div>
+
+  <template id="row-tmpl">
+    <div class="row bg-white rounded shadow p-4">
+      <div class="flex items-baseline justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-wide text-slate-500">ADP</div>
+          <div class="adp-name text-lg font-medium"></div>
+          <div class="adp-meta text-xs text-slate-500"></div>
+        </div>
+        <div class="text-xs text-slate-400 source-tag"></div>
+      </div>
+      <div class="mt-3 grid gap-2 candidates"></div>
+      <div class="mt-3 flex gap-2 items-center">
+        <input class="manual-id border rounded px-2 py-1 text-sm flex-1"
+               placeholder="Or paste an EM employee_id..." />
+        <button class="confirm-btn px-3 py-1 rounded bg-emerald-600 text-white text-sm">Confirm</button>
+        <button class="reject-btn px-3 py-1 rounded bg-rose-600 text-white text-sm">No match</button>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    const rowsEl = document.getElementById("rows");
+    const summaryEl = document.getElementById("summary");
+    const tmpl = document.getElementById("row-tmpl");
+
+    async function load() {
+      rowsEl.innerHTML = "";
+      summaryEl.textContent = "Loading...";
+      const res = await fetch("/api/pending");
+      const { items, total } = await res.json();
+      summaryEl.textContent = `${items.length} of ${total} rows need review.`;
+      for (const item of items) renderRow(item);
+    }
+
+    function renderRow(item) {
+      const node = tmpl.content.cloneNode(true);
+      const row = node.querySelector(".row");
+      row.dataset.adpId = item.adp_associate_id;
+      node.querySelector(".adp-name").textContent = item.adp_name;
+      node.querySelector(".adp-meta").textContent =
+        [item.adp_title, item.adp_department, item.adp_community].filter(Boolean).join(" · ");
+      node.querySelector(".source-tag").textContent = item.match_source;
+
+      const candsEl = node.querySelector(".candidates");
+      for (const c of (item.candidates || [])) {
+        const btn = document.createElement("button");
+        btn.className = "text-left border rounded px-3 py-2 text-sm hover:bg-emerald-50";
+        btn.innerHTML = `<span class="font-medium">${c.em_name}</span>` +
+          ` <span class="text-slate-500">${c.em_employee_id}</span>` +
+          ` <span class="text-xs text-slate-400 float-right">${(c.score * 100).toFixed(0)}%</span>`;
+        btn.onclick = () => decide(item.adp_associate_id, c.em_employee_id, "confirmed", row);
+        candsEl.appendChild(btn);
+      }
+
+      node.querySelector(".confirm-btn").onclick = () => {
+        const id = row.querySelector(".manual-id").value.trim();
+        if (id) decide(item.adp_associate_id, id, "manual", row);
+      };
+      node.querySelector(".reject-btn").onclick = () =>
+        decide(item.adp_associate_id, null, "rejected", row);
+
+      rowsEl.appendChild(node);
+    }
+
+    async function decide(adp_id, em_id, decision, row) {
+      row.classList.add("opacity-50", "pointer-events-none");
+      const res = await fetch("/api/decide", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ adp_associate_id: adp_id, em_employee_id: em_id, decision }),
+      });
+      if (res.ok) row.remove();
+      else row.classList.remove("opacity-50", "pointer-events-none");
+    }
+
+    document.getElementById("refresh").onclick = load;
+    load();
+  </script>
+</body>
+</html>
