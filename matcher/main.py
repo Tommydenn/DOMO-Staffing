@@ -72,29 +72,47 @@ def _resolve_pending_with_llm(results: list[matcher.MatchResult]) -> None:
             r.notes = decision.rationale or "llm declined to pick"
 
 
-def _build_crosswalk_rows(results: list[matcher.MatchResult]) -> tuple[list[dict], list[str]]:
+def _build_crosswalk_rows(
+    results: list[matcher.MatchResult],
+    adp_workers_by_id: dict[str, "matcher.AdpWorker"] | None = None,
+) -> tuple[list[dict], list[str]]:
+    import json as _json
     today = date.today().isoformat()
     columns = [
         "unified_employee_id",
         "adp_associate_id",
         "adp_name",
+        "adp_title",
+        "adp_department",
+        "adp_community",
         "em_employee_id",
         "em_name",
+        "candidates_json",
         "confidence",
         "match_source",
         "verified_by",
         "last_verified",
         "notes",
     ]
+    by_id = adp_workers_by_id or {}
     rows: list[dict] = []
     for r in results:
         unified = r.em_employee_id if r.em_employee_id else f"ADP:{r.adp_associate_id}"
+        worker = by_id.get(r.adp_associate_id)
+        cand_objs = [
+            {"em_employee_id": cid, "em_name": cname, "score": cscore}
+            for cid, cname, cscore in r.candidates
+        ] if r.candidates else []
         rows.append({
             "unified_employee_id": unified,
             "adp_associate_id": r.adp_associate_id,
             "adp_name": r.adp_name,
+            "adp_title": (worker.adp_title or "") if worker else "",
+            "adp_department": (worker.adp_department or "") if worker else "",
+            "adp_community": (worker.adp_community or "") if worker else "",
             "em_employee_id": r.em_employee_id or "",
             "em_name": r.em_name or "",
+            "candidates_json": _json.dumps(cand_objs) if cand_objs else "",
             "confidence": f"{r.confidence:.3f}",
             "match_source": r.match_source,
             "verified_by": "",
@@ -131,7 +149,7 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
         _resolve_pending_with_llm(results)
     _print_stats(results)
 
-    rows, columns = _build_crosswalk_rows(results)
+    rows, columns = _build_crosswalk_rows(results, {w.adp_associate_id: w for w in adp_workers})
     out_path = OUTPUT_DIR / f"crosswalk_dryrun_{date.today().isoformat()}.csv"
     pd.DataFrame(rows, columns=columns).to_csv(out_path, index=False)
     print(f"\nDry-run crosswalk written to {out_path}")
@@ -157,7 +175,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     _resolve_pending_with_llm(results)
     _print_stats(results)
-    rows, columns = _build_crosswalk_rows(results)
+    rows, columns = _build_crosswalk_rows(results, {w.adp_associate_id: w for w in adp_workers})
     print(f"Uploading {len(rows)} rows to dataset {cw_id}...", file=sys.stderr)
     client.replace_dataset_csv(cw_id, rows, columns)
     print("Done.")

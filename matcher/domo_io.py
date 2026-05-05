@@ -126,6 +126,13 @@ class DomoClient:
                     return None
                 offset += 50
 
+    def get_dataset_columns(self, dataset_id: str) -> list[dict]:
+        url = f"{_API_BASE}/v1/datasets/{dataset_id}"
+        with httpx.Client(timeout=30.0) as client:
+            r = client.get(url, headers=self._headers())
+            r.raise_for_status()
+            return r.json().get("schema", {}).get("columns", []) or []
+
     def create_dataset(self, name: str, description: str, columns: list[dict]) -> str:
         url = f"{_API_BASE}/v1/datasets"
         body = {"name": name, "description": description, "schema": {"columns": columns}}
@@ -134,10 +141,25 @@ class DomoClient:
             r.raise_for_status()
             return r.json()["id"]
 
+    def delete_dataset(self, dataset_id: str) -> None:
+        url = f"{_API_BASE}/v1/datasets/{dataset_id}"
+        with httpx.Client(timeout=30.0) as client:
+            r = client.delete(url, headers=self._headers())
+            r.raise_for_status()
+
     def ensure_dataset(self, name: str, description: str, columns: list[dict]) -> str:
+        """Find by name or create. Recreates the dataset if schema doesn't match."""
         existing = self.find_dataset_by_name(name)
-        if existing:
+        if not existing:
+            return self.create_dataset(name, description, columns)
+        # Compare existing columns to desired columns by (name, type)
+        current = self.get_dataset_columns(existing)
+        want = {(c["name"], c["type"]) for c in columns}
+        have = {(c.get("name"), c.get("type")) for c in current}
+        if want == have:
             return existing
+        # Schema mismatch — recreate (the data is rebuilt every run anyway)
+        self.delete_dataset(existing)
         return self.create_dataset(name, description, columns)
 
     # ----- writes -----
@@ -181,8 +203,12 @@ CROSSWALK_COLUMNS = [
     {"type": "STRING", "name": "unified_employee_id"},
     {"type": "STRING", "name": "adp_associate_id"},
     {"type": "STRING", "name": "adp_name"},
+    {"type": "STRING", "name": "adp_title"},
+    {"type": "STRING", "name": "adp_department"},
+    {"type": "STRING", "name": "adp_community"},
     {"type": "STRING", "name": "em_employee_id"},
     {"type": "STRING", "name": "em_name"},
+    {"type": "STRING", "name": "candidates_json"},
     {"type": "DOUBLE", "name": "confidence"},
     {"type": "STRING", "name": "match_source"},
     {"type": "STRING", "name": "verified_by"},
