@@ -21,13 +21,11 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        working-directory: matcher
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r matcher/requirements.txt
 
       - name: Run matcher
-        working-directory: matcher
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DOMO_API_HOST: ${{ secrets.DOMO_API_HOST }}
