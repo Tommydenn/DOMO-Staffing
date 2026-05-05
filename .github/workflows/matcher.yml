@@ -28,12 +28,11 @@ jobs:
       - name: Run matcher
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          DOMO_API_HOST: ${{ secrets.DOMO_API_HOST }}
-          DOMO_DEVELOPER_TOKEN: ${{ secrets.DOMO_DEVELOPER_TOKEN }}
+          DOMO_CLIENT_ID: ${{ secrets.DOMO_CLIENT_ID }}
+          DOMO_CLIENT_SECRET: ${{ secrets.DOMO_CLIENT_SECRET }}
           DATASET_ADP_PUNCHES: ${{ secrets.DATASET_ADP_PUNCHES }}
           DATASET_EM_EMPLOYEES: ${{ secrets.DATASET_EM_EMPLOYEES }}
           DATASET_EM_SVC_RECEIVED: ${{ secrets.DATASET_EM_SVC_RECEIVED }}
-          DATASET_CROSSWALK: ${{ secrets.DATASET_CROSSWALK }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
         run: python -m matcher.main run
 

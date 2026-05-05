@@ -140,14 +140,15 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     client = domo_io.DomoClient.from_env()
-    cw_id = os.environ.get("DATASET_CROSSWALK", "").strip()
-    if not cw_id:
-        print(
-            "DATASET_CROSSWALK is empty. Upload the seed CSV first, then paste the new "
-            "dataset ID into matcher/.env (and as a GitHub Actions secret).",
-            file=sys.stderr,
-        )
-        return 2
+    cw_id = client.ensure_dataset(
+        domo_io.CROSSWALK_NAME, domo_io.CROSSWALK_DESC, domo_io.CROSSWALK_COLUMNS
+    )
+    print(f"Crosswalk dataset id: {cw_id}", file=sys.stderr)
+    # Ensure the decisions dataset exists too (review UI writes to it)
+    dec_id = client.ensure_dataset(
+        domo_io.DECISIONS_NAME, domo_io.DECISIONS_DESC, domo_io.DECISIONS_COLUMNS
+    )
+    print(f"Decisions dataset id: {dec_id}", file=sys.stderr)
     adp_workers, em_employees = _load_workers_and_employees(client)
     results = matcher.run_tiered_match(
         adp_workers, em_employees,

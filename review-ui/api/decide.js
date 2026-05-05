@@ -1,46 +1,112 @@
-// POST /api/decide — record a human decision into MAP | Employee Crosswalk Decisions.
-// We append to a separate "decisions" dataset rather than mutating the matcher output;
-// the matcher reads decisions and respects them on the next run (manual rows pinned).
+// POST /api/decide — append a human decision to MAP | Employee Crosswalk Decisions.
+// Uses OAuth + the Domo public API. Append is implemented as read-all + add + replace.
 
 import axios from "axios";
 
+const DECISIONS_NAME = "MAP | Employee Crosswalk Decisions";
+const DECISIONS_DESC = "Append-only log of human review decisions from the Vercel review UI.";
+const DECISIONS_COLUMNS = [
+  { type: "STRING", name: "adp_associate_id" },
+  { type: "STRING", name: "em_employee_id" },
+  { type: "STRING", name: "decision" },
+  { type: "DATETIME", name: "decided_at" },
+];
+
+let _token = null;
+let _tokenExpires = 0;
+
+async function bearer() {
+  if (_token && Date.now() < _tokenExpires - 60_000) return _token;
+  const id = process.env.DOMO_CLIENT_ID;
+  const sec = process.env.DOMO_CLIENT_SECRET;
+  const auth = Buffer.from(`${id}:${sec}`).toString("base64");
+  const r = await axios.post(
+    "https://api.domo.com/oauth/token",
+    null,
+    {
+      params: { grant_type: "client_credentials", scope: "data user" },
+      headers: { Authorization: `Basic ${auth}` },
+      timeout: 15000,
+    }
+  );
+  _token = r.data.access_token;
+  _tokenExpires = Date.now() + Number(r.data.expires_in) * 1000;
+  return _token;
+}
+
+async function ensureDecisionsDataset() {
+  const tok = await bearer();
+  const list = await axios.get("https://api.domo.com/v1/datasets", {
+    headers: { Authorization: `Bearer ${tok}`, Accept: "application/json" },
+    params: { nameLike: DECISIONS_NAME, limit: 50 },
+    timeout: 30000,
+  });
+  for (const ds of list.data || []) if (ds.name === DECISIONS_NAME) return ds.id;
+  const created = await axios.post(
+    "https://api.domo.com/v1/datasets",
+    { name: DECISIONS_NAME, description: DECISIONS_DESC, schema: { columns: DECISIONS_COLUMNS } },
+    { headers: { Authorization: `Bearer ${tok}`, Accept: "application/json" }, timeout: 30000 }
+  );
+  return created.data.id;
+}
+
+async function readAll(datasetId) {
+  const tok = await bearer();
+  const r = await axios.post(
+    `https://api.domo.com/v1/datasets/query/execute/${datasetId}`,
+    { sql: "SELECT * FROM table" },
+    { headers: { Authorization: `Bearer ${tok}`, Accept: "application/json" }, timeout: 60000 }
+  );
+  const cols = r.data.columns || [];
+  return (r.data.rows || []).map((row) => Object.fromEntries(cols.map((c, i) => [c, row[i]])));
+}
+
+function rowsToCsv(rows, cols) {
+  const escape = (v) => {
+    const s = v === undefined || v === null ? "" : String(v);
+    return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+  };
+  const out = [cols.join(",")];
+  for (const r of rows) out.push(cols.map((c) => escape(r[c])).join(","));
+  return out.join("\n") + "\n";
+}
+
+async function replaceData(datasetId, rows, cols) {
+  const tok = await bearer();
+  await axios.put(
+    `https://api.domo.com/v1/datasets/${datasetId}/data`,
+    rowsToCsv(rows, cols),
+    {
+      headers: {
+        Authorization: `Bearer ${tok}`,
+        "Content-Type": "text/csv",
+        Accept: "application/json",
+      },
+      timeout: 60000,
+    }
+  );
+}
+
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "method not allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ error: "method not allowed" });
   const { adp_associate_id, em_employee_id, decision } = req.body || {};
   if (!adp_associate_id || !decision) {
     return res.status(400).json({ error: "adp_associate_id and decision required" });
   }
-
-  const host = process.env.DOMO_API_HOST;
-  const token = process.env.DOMO_DEVELOPER_TOKEN;
-  const decisionsDataset = process.env.DATASET_CROSSWALK_DECISIONS;
-  if (!host || !token || !decisionsDataset) {
-    return res.status(500).json({ error: "server not configured" });
+  if (!process.env.DOMO_CLIENT_ID || !process.env.DOMO_CLIENT_SECRET) {
+    return res.status(500).json({ error: "DOMO_CLIENT_ID/SECRET not configured" });
   }
-
-  const ts = new Date().toISOString();
-  const csv =
-    "adp_associate_id,em_employee_id,decision,decided_at\n" +
-    [adp_associate_id, em_employee_id || "", decision, ts]
-      .map(v => String(v).replaceAll('"', '""'))
-      .map(v => /[",\n]/.test(v) ? `"${v}"` : v)
-      .join(",") + "\n";
-
   try {
-    await axios.put(
-      `https://${host}/api/data/v3/datasources/${decisionsDataset}/uploads`,
-      csv,
-      {
-        params: { appendData: "true" },
-        headers: {
-          "X-DOMO-Developer-Token": token,
-          "Content-Type": "text/csv",
-        },
-        timeout: 60000,
-      }
-    );
+    const datasetId = await ensureDecisionsDataset();
+    const existing = await readAll(datasetId);
+    existing.push({
+      adp_associate_id,
+      em_employee_id: em_employee_id || "",
+      decision,
+      decided_at: new Date().toISOString(),
+    });
+    const colNames = DECISIONS_COLUMNS.map((c) => c.name);
+    await replaceData(datasetId, existing, colNames);
     res.status(200).json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message || "domo upload failed" });
