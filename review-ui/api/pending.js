@@ -7,6 +7,7 @@ const PENDING_SOURCES = new Set(["llm-pending", "ambiguous-exact", "unmatched", 
 const CROSSWALK_NAME = "MAP | Employee Crosswalk";
 const PUNCHES_DATASET = "8e3dce28-1e8b-4cf3-a7f4-b95e06e4eaf6";  // RAW | ADP Punches
 const SERVICES_DATASET = "b8806ae0-6b04-4cb1-8896-02d0aa7ec3ef"; // RAW | EM | Service Received
+const EM_EMPLOYEES_DATASET = "cc34bb65-3e4d-4942-8f5f-a4f3488aae92"; // RAW | EM | Employees
 
 let _token = null;
 let _tokenExpires = 0;
@@ -103,6 +104,33 @@ async function fetchAdpActivity() {
   return map;
 }
 
+// EM employees profile metadata, keyed by ID. Used to mark Inactive accounts
+// (Eldermark sometimes has duplicate accounts for one person — the deactivated
+// one should not be the match) and to surface Title + Hire_Date for context.
+async function fetchEmEmployees() {
+  const sql = `
+    SELECT
+      ID AS em_id,
+      Inactive AS inactive,
+      Title AS title,
+      Hire_Date AS hire_date,
+      Community_ID AS home_community_id
+    FROM table
+  `;
+  const rows = await safeQuery(EM_EMPLOYEES_DATASET, sql);
+  const map = new Map();
+  for (const r of rows) {
+    if (!r.em_id) continue;
+    map.set(r.em_id, {
+      inactive: String(r.inactive || "").toLowerCase() === "true",
+      title: r.title || "",
+      hire_date: r.hire_date || "",
+      home_community_id: r.home_community_id || "",
+    });
+  }
+  return map;
+}
+
 // Last-30-day EM service activity, keyed by Employee_ID. Med passes attributed
 // to Given_or_Recorded_Person_ID are merged in so candidates with med-only
 // activity still show up.
@@ -141,11 +169,12 @@ export default async function handler(req, res) {
     const datasetId = await findDatasetIdByName(CROSSWALK_NAME);
     if (!datasetId) return res.status(200).json({ items: [], total: 0, summary: {} });
 
-    // Run the 3 queries in parallel — activity queries are independent of crosswalk
-    const [rows, adpActivity, emActivity] = await Promise.all([
+    // Run the 4 queries in parallel — side queries are independent of crosswalk
+    const [rows, adpActivity, emActivity, emEmployees] = await Promise.all([
       queryDataset(datasetId, "SELECT * FROM table"),
       fetchAdpActivity(),
       fetchEmActivity(),
+      fetchEmEmployees(),
     ]);
 
     const summary = { exact: 0, fuzzy: 0, llm: 0, "manual-review": 0, unmatched: 0, other: 0 };
@@ -159,11 +188,16 @@ export default async function handler(req, res) {
       .map((row) => {
         const cands = parseCandidates(row.candidates_json).map((c) => {
           const act = emActivity.get(c.em_employee_id);
+          const profile = emEmployees.get(c.em_employee_id);
           return {
             ...c,
             svc_hrs_30d: act?.svc_hrs_30d ?? 0,
             svc_count_30d: act?.svc_count_30d ?? 0,
             last_service: act?.last_service ?? "",
+            inactive: profile?.inactive ?? false,
+            em_title: profile?.title ?? "",
+            em_hire_date: profile?.hire_date ?? "",
+            em_home_community_id: profile?.home_community_id ?? "",
           };
         });
         const adpAct = adpActivity.get(row.adp_associate_id);
