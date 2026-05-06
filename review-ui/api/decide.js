@@ -99,8 +99,11 @@ async function replaceData(datasetId, rows, cols) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "method not allowed" });
   const { adp_associate_id, em_employee_id, decision } = req.body || {};
-  if (!adp_associate_id || !decision) {
-    return res.status(400).json({ error: "adp_associate_id and decision required" });
+  // Accept both directions:
+  //   ADP-anchored: adp_associate_id required; em_employee_id optional (No match → "")
+  //   EM-anchored: em_employee_id required; adp_associate_id optional (No match → "")
+  if (!decision || (!adp_associate_id && !em_employee_id)) {
+    return res.status(400).json({ error: "decision plus at least one of adp_associate_id or em_employee_id required" });
   }
   if (!process.env.DOMO_CLIENT_ID || !process.env.DOMO_CLIENT_SECRET) {
     return res.status(500).json({ error: "DOMO_CLIENT_ID/SECRET not configured" });
@@ -109,7 +112,7 @@ export default async function handler(req, res) {
     const datasetId = await ensureDecisionsDataset();
     const existing = await readAll(datasetId);
     existing.push({
-      adp_associate_id,
+      adp_associate_id: adp_associate_id || "",
       em_employee_id: em_employee_id || "",
       decision,
       decided_at: new Date().toISOString(),

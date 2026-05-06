@@ -24,10 +24,13 @@
     <section id="summary" class="mb-4 grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs"></section>
 
     <section class="mb-5 flex flex-wrap items-center gap-2 bg-white rounded-lg shadow-sm border border-slate-200 p-3">
-      <div class="flex gap-1 mr-2">
+      <div class="flex gap-1 mr-2 flex-wrap">
+        <span class="text-xs uppercase tracking-wider text-slate-500 self-center mr-1">ADP →</span>
         <button data-tab="manual-review" class="tab-btn px-3 py-1.5 rounded-md text-sm font-medium bg-slate-900 text-white">Manual review</button>
         <button data-tab="unmatched" class="tab-btn px-3 py-1.5 rounded-md text-sm font-medium bg-slate-100 text-slate-700 hover:bg-slate-200">Unmatched</button>
         <button data-tab="all" class="tab-btn px-3 py-1.5 rounded-md text-sm font-medium bg-slate-100 text-slate-700 hover:bg-slate-200">All</button>
+        <span class="text-xs uppercase tracking-wider text-slate-500 self-center mx-1">EM →</span>
+        <button data-tab="em-unmatched" class="tab-btn px-3 py-1.5 rounded-md text-sm font-medium bg-slate-100 text-slate-700 hover:bg-slate-200">Unmatched <span class="em-tab-count text-slate-400 ml-1"></span></button>
       </div>
       <input id="search" type="search" placeholder="Search by name, community, title…"
              class="flex-1 min-w-48 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-slate-300 focus:outline-none" />
@@ -44,6 +47,35 @@
     <p id="empty" class="hidden text-center text-slate-500 mt-12 text-sm">No items match the current filters.</p>
     <p class="text-xs text-slate-400 text-center mt-10">Activity badges show last 30 days. <span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle"></span> recent · faded = stale</p>
   </div>
+
+  <template id="em-row-tmpl">
+    <article class="row em-row bg-white rounded-lg shadow-sm border border-slate-200 p-4 hover:shadow-md hover:border-slate-300 transition-all">
+      <div class="flex items-start justify-between gap-4">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-wider rounded bg-purple-100 text-purple-800 font-semibold">EM</span>
+            <h2 class="em-name text-lg font-medium"></h2>
+            <span class="em-svc-badge inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded font-medium"></span>
+          </div>
+          <div class="em-meta text-xs text-slate-600 mt-1"></div>
+          <div class="em-id text-xs text-slate-400 font-mono mt-0.5"></div>
+        </div>
+      </div>
+
+      <div class="mt-3">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1.5 cand-header font-semibold">Suggested ADP matches</div>
+        <div class="adp-candidates space-y-1.5"></div>
+        <p class="no-cands hidden text-xs text-slate-500 italic mt-1">No likely ADP punchers by name match. Paste an ADP Associate ID below or mark "no match".</p>
+      </div>
+
+      <div class="mt-3 flex flex-wrap gap-2 items-center">
+        <input class="manual-id border border-slate-300 rounded-md px-2 py-1 text-sm flex-1 min-w-40 font-mono focus:ring-2 focus:ring-slate-300 focus:outline-none"
+               placeholder="Or paste an ADP Associate ID…" />
+        <button class="confirm-btn px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium">Confirm ID</button>
+        <button class="reject-btn px-3 py-1.5 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-sm font-medium">No match</button>
+      </div>
+    </article>
+  </template>
 
   <template id="row-tmpl">
     <article class="row bg-white rounded-lg shadow-sm border border-slate-200 p-4 hover:shadow-md hover:border-slate-300 transition-all">
@@ -91,6 +123,7 @@
     const visibleCountEl = document.getElementById("visible-count");
 
     let _items = [];
+    let _emItems = [];
     let _activeTab = "manual-review";
 
     const SUMMARY_LABELS = {
@@ -118,6 +151,10 @@
         return;
       }
       _items = data.items || [];
+      _emItems = data.em_items || [];
+      // Update the EM tab badge with the unmatched-EM count
+      const emBadge = document.querySelector(".em-tab-count");
+      if (emBadge) emBadge.textContent = _emItems.length ? `(${_emItems.length})` : "";
       renderSummary(data.summary || {}, data.total || 0);
       buildFilters(_items);
       renderList();
@@ -161,6 +198,38 @@
       const dept = deptEl.value;
       const comm = commEl.value;
 
+      groupsEl.innerHTML = "";
+
+      // EM-anchored tab uses _emItems and a different row template
+      if (_activeTab === "em-unmatched") {
+        const filteredEm = _emItems.filter(it => {
+          if (q) {
+            const hay = `${it.em_name} ${it.em_title}`.toLowerCase();
+            if (!hay.includes(q)) return false;
+          }
+          // Department / community filters target ADP fields and don't apply to
+          // EM-anchored cards (EM employees don't carry ADP department).
+          return true;
+        });
+        visibleCountEl.textContent = `${filteredEm.length.toLocaleString()} shown`;
+        emptyEl.classList.toggle("hidden", filteredEm.length > 0);
+        if (!filteredEm.length) return;
+
+        const intro = document.createElement("div");
+        intro.className = "bg-purple-50 border border-purple-200 rounded-md p-3 text-sm text-purple-900 mb-2";
+        intro.innerHTML = `<strong>Eldermark employees performing services with no matched ADP associate.</strong>
+          These are real care workers who are clocking services but the matcher couldn't find their ADP profile.
+          Confirm the right ADP person to close the loop.`;
+        groupsEl.appendChild(intro);
+
+        const rowsWrap = document.createElement("div");
+        rowsWrap.className = "space-y-2";
+        for (const it of filteredEm) renderEmRow(it, rowsWrap);
+        groupsEl.appendChild(rowsWrap);
+        return;
+      }
+
+      // ADP-anchored tabs (manual-review / unmatched / all)
       const filtered = _items.filter(it => {
         if (_activeTab === "manual-review" && it.match_source !== "manual-review" && it.match_source !== "ambiguous-exact" && it.match_source !== "llm-pending") return false;
         if (_activeTab === "unmatched" && it.match_source !== "unmatched") return false;
@@ -174,7 +243,6 @@
       });
 
       visibleCountEl.textContent = `${filtered.length.toLocaleString()} shown`;
-      groupsEl.innerHTML = "";
       emptyEl.classList.toggle("hidden", filtered.length > 0);
 
       // Group by community
@@ -202,6 +270,65 @@
         section.appendChild(rowsWrap);
         groupsEl.appendChild(section);
       }
+    }
+
+    function renderEmRow(item, container) {
+      const tmplEm = document.getElementById("em-row-tmpl");
+      const node = tmplEm.content.cloneNode(true);
+      const row = node.querySelector(".row");
+      row.dataset.emId = item.em_employee_id;
+
+      node.querySelector(".em-name").textContent = item.em_name || item.em_employee_id;
+      const svcBadge = node.querySelector(".em-svc-badge");
+      const svc30 = Number(item.svc_hrs_30d || 0);
+      const cnt30 = Number(item.svc_count_30d || 0);
+      const svcDot = svc30 > 0 ? `<span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>` : "";
+      svcBadge.outerHTML = `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-800 font-medium">${svcDot}${svc30.toFixed(0)} svc hrs · ${cnt30.toLocaleString()} services 30d</span>`;
+
+      const metaParts = [item.em_title, item.em_hire_date ? `hired ${String(item.em_hire_date).slice(0, 10)}` : ""].filter(Boolean);
+      node.querySelector(".em-meta").textContent = metaParts.join(" · ") || "(no title)";
+      node.querySelector(".em-id").textContent = `EM: ${item.em_employee_id}`;
+
+      const candsEl = node.querySelector(".adp-candidates");
+      if (!item.adp_candidates || item.adp_candidates.length === 0) {
+        node.querySelector(".cand-header").classList.add("hidden");
+        node.querySelector(".no-cands").classList.remove("hidden");
+      } else {
+        for (const c of item.adp_candidates) {
+          const btn = document.createElement("button");
+          const punchH = Number(c.adp_hours_30d || 0);
+          const isStale = punchH === 0;
+          btn.className = `w-full text-left border rounded-md px-3 py-2 text-sm hover:bg-emerald-50 hover:border-emerald-400 ${isStale ? "opacity-50 border-slate-200" : "border-slate-300"}`;
+          const dot = punchH > 0 ? `<span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>` : "";
+          const punchBadge = punchH > 0
+            ? `<span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-medium">${dot}${punchH.toFixed(0)} punch hrs 30d</span>`
+            : `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">No punches 30d</span>`;
+          const meta = [c.adp_title, c.adp_community].filter(Boolean).join(" · ");
+          btn.innerHTML = `<div class="flex items-baseline justify-between gap-3">
+            <div class="min-w-0 flex-1">
+              <div>
+                <span class="font-medium">${escapeHtml(c.adp_name || "—")}</span>
+                <span class="text-xs text-slate-400 font-mono ml-2">${escapeHtml(c.adp_associate_id || "")}</span>
+              </div>
+              ${meta ? `<div class="text-xs text-slate-500 mt-0.5">${escapeHtml(meta)}</div>` : ""}
+            </div>
+            <div class="flex gap-2 items-baseline shrink-0 flex-wrap justify-end">
+              ${punchBadge}
+              <span class="text-xs text-slate-500">${(Number(c.score || 0) * 100).toFixed(0)}%</span>
+            </div>
+          </div>`;
+          btn.onclick = () => decide(c.adp_associate_id, item.em_employee_id, "confirmed", row);
+          candsEl.appendChild(btn);
+        }
+      }
+
+      node.querySelector(".confirm-btn").onclick = () => {
+        const id = row.querySelector(".manual-id").value.trim();
+        if (id) decide(id, item.em_employee_id, "manual", row);
+      };
+      node.querySelector(".reject-btn").onclick = () => decide(null, item.em_employee_id, "rejected", row);
+
+      container.appendChild(node);
     }
 
     function escapeHtml(s) {
@@ -244,8 +371,10 @@
         node.querySelector(".cand-header").classList.add("hidden");
         node.querySelector(".no-cands").classList.remove("hidden");
       } else {
-        // Sort: 30-day-active first; then YTD; then score
+        // Sort: active EM accounts first, then 30-day activity, then YTD, then score.
+        // Inactive duplicates sink to the bottom so the right one is at the top.
         const sorted = [...item.candidates].sort((a, b) => {
+          if (!!a.inactive !== !!b.inactive) return a.inactive ? 1 : -1;
           const a30 = Number(a.svc_hrs_30d || 0), b30 = Number(b.svc_hrs_30d || 0);
           if (a30 !== b30) return b30 - a30;
           const ay = Number(a.ytd_services || 0), by = Number(b.ytd_services || 0);
@@ -256,23 +385,43 @@
           const btn = document.createElement("button");
           const ytd = Number(c.ytd_services || 0);
           const svc30 = Number(c.svc_hrs_30d || 0);
-          const cnt30 = Number(c.svc_count_30d || 0);
           const isStale = svc30 === 0 && ytd === 0;
+          const isInactive = !!c.inactive;
           const score = Number(c.score || 0);
-          btn.className = `w-full text-left border rounded-md px-3 py-2 text-sm hover:bg-emerald-50 hover:border-emerald-400 ${isStale ? "opacity-50 border-slate-200" : "border-slate-300"}`;
+          // Inactive overrides the stale styling: red ring + 60% opacity so it's clearly demoted
+          let frame = "border-slate-300";
+          let opacity = "";
+          if (isInactive) {
+            frame = "border-rose-300 bg-rose-50/40";
+            opacity = "opacity-70";
+          } else if (isStale) {
+            frame = "border-slate-200";
+            opacity = "opacity-50";
+          }
+          btn.className = `w-full text-left border rounded-md px-3 py-2 text-sm hover:bg-emerald-50 hover:border-emerald-400 ${frame} ${opacity}`;
           const dot = svc30 > 0 ? `<span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>` : "";
+          const inactiveBadge = isInactive
+            ? `<span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 font-semibold">Inactive</span>`
+            : "";
           const recentBadge = svc30 > 0
             ? `<span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-medium">${dot}${svc30.toFixed(0)} svc hrs 30d</span>`
             : `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">No svc 30d</span>`;
           const ytdBadge = ytd > 0
             ? `<span class="text-xs text-slate-500">${ytd.toLocaleString()} svc YTD</span>`
             : "";
+          const titleLine = c.em_title
+            ? `<div class="text-xs text-slate-500 mt-0.5">${escapeHtml(c.em_title)}${c.em_hire_date ? ` · hired ${escapeHtml(String(c.em_hire_date).slice(0, 10))}` : ""}</div>`
+            : "";
           btn.innerHTML = `<div class="flex items-baseline justify-between gap-3">
             <div class="min-w-0 flex-1">
-              <span class="font-medium">${escapeHtml(c.em_name || "—")}</span>
-              <span class="text-xs text-slate-400 font-mono ml-2">${escapeHtml(c.em_employee_id || "")}</span>
+              <div>
+                <span class="font-medium">${escapeHtml(c.em_name || "—")}</span>
+                <span class="text-xs text-slate-400 font-mono ml-2">${escapeHtml(c.em_employee_id || "")}</span>
+              </div>
+              ${titleLine}
             </div>
-            <div class="flex gap-2 items-baseline shrink-0">
+            <div class="flex gap-2 items-baseline shrink-0 flex-wrap justify-end">
+              ${inactiveBadge}
               ${recentBadge}
               ${ytdBadge}
               <span class="text-xs text-slate-500">${(score * 100).toFixed(0)}%</span>
@@ -332,6 +481,10 @@
         const active = b === btn;
         b.className = `tab-btn px-3 py-1.5 rounded-md text-sm font-medium ${active ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`;
       });
+      // Department + community filters are ADP-side only; hide them when viewing EM-anchored
+      const isEm = _activeTab === "em-unmatched";
+      deptEl.classList.toggle("hidden", isEm);
+      commEl.classList.toggle("hidden", isEm);
       renderList();
     }));
     load();
