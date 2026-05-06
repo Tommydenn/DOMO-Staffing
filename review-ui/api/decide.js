@@ -1,5 +1,6 @@
 // POST /api/decide — append a human decision to MAP | Employee Crosswalk Decisions.
-// Uses OAuth + the Domo public API. Append is implemented as read-all + add + replace.
+// Uses OAuth + the Domo public API. Append is implemented as read-all + add + replace,
+// with the readAll step tolerant of brand-new (empty) datasets that 400 on SELECT.
 
 import axios from "axios";
 
@@ -50,15 +51,23 @@ async function ensureDecisionsDataset() {
   return created.data.id;
 }
 
+// Read existing rows. Brand-new api-type datasets return 400 on SELECT before
+// any data has been uploaded — treat that as empty rather than failing the request.
 async function readAll(datasetId) {
   const tok = await bearer();
-  const r = await axios.post(
-    `https://api.domo.com/v1/datasets/query/execute/${datasetId}`,
-    { sql: "SELECT * FROM table" },
-    { headers: { Authorization: `Bearer ${tok}`, Accept: "application/json" }, timeout: 60000 }
-  );
-  const cols = r.data.columns || [];
-  return (r.data.rows || []).map((row) => Object.fromEntries(cols.map((c, i) => [c, row[i]])));
+  try {
+    const r = await axios.post(
+      `https://api.domo.com/v1/datasets/query/execute/${datasetId}`,
+      { sql: "SELECT * FROM table" },
+      { headers: { Authorization: `Bearer ${tok}`, Accept: "application/json" }, timeout: 60000 }
+    );
+    const cols = r.data.columns || [];
+    return (r.data.rows || []).map((row) => Object.fromEntries(cols.map((c, i) => [c, row[i]])));
+  } catch (err) {
+    const status = err?.response?.status;
+    if (status === 400 || status === 404) return [];
+    throw err;
+  }
 }
 
 function rowsToCsv(rows, cols) {
@@ -109,6 +118,7 @@ export default async function handler(req, res) {
     await replaceData(datasetId, existing, colNames);
     res.status(200).json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message || "domo upload failed" });
+    const detail = err?.response?.data || err?.message || "domo upload failed";
+    res.status(500).json({ error: typeof detail === "string" ? detail : JSON.stringify(detail) });
   }
 }
