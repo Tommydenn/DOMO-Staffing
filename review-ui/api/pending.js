@@ -8,6 +8,7 @@ const CROSSWALK_NAME = "MAP | Employee Crosswalk";
 const PUNCHES_DATASET = "8e3dce28-1e8b-4cf3-a7f4-b95e06e4eaf6";  // RAW | ADP Punches
 const SERVICES_DATASET = "b8806ae0-6b04-4cb1-8896-02d0aa7ec3ef"; // RAW | EM | Service Received
 const EM_EMPLOYEES_DATASET = "cc34bb65-3e4d-4942-8f5f-a4f3488aae92"; // RAW | EM | Employees
+const EM_COMMUNITIES_DATASET = "7570562b-d421-448c-85f7-b42e0967ab83"; // RAW | EM | Communities (30 rows)
 
 let _token = null;
 let _tokenExpires = 0;
@@ -154,6 +155,42 @@ async function fetchEmEmployees() {
   return map;
 }
 
+// Last-30d EM service activity broken down by (em_id, community_id) so we can
+// show "where the services are getting confirmed" on EM-unmatched cards.
+async function fetchEmServicesByCommunity() {
+  const sql = `
+    SELECT Employee_ID AS em_id,
+           CAST(Community_ID AS STRING) AS community_id,
+           SUM(Minutes_of_Service_Actual) / 60.0 AS svc_hrs_30d
+    FROM table
+    WHERE Minutes_of_Service_Actual > 0
+      AND (Canceled_Code IS NULL OR Canceled_Code = '')
+      AND Employee_ID IS NOT NULL AND Employee_ID != ''
+      AND Community_ID IS NOT NULL
+      AND CAST(Service_Date AS DATE) >= DATE_SUB(CURRENT_DATE, 30)
+    GROUP BY 1, 2
+  `;
+  const rows = await safeQuery(SERVICES_DATASET, sql);
+  const map = new Map();
+  for (const r of rows) {
+    if (!r.em_id) continue;
+    const arr = map.get(r.em_id) || [];
+    arr.push({ community_id: r.community_id, svc_hrs_30d: Number(r.svc_hrs_30d || 0) });
+    map.set(r.em_id, arr);
+  }
+  for (const arr of map.values()) arr.sort((a, b) => b.svc_hrs_30d - a.svc_hrs_30d);
+  return map;
+}
+
+// EM community ID → name lookup (Eldermark side, ~30 rows).
+async function fetchCommunityNames() {
+  const sql = `SELECT CAST(Community_ID AS STRING) AS community_id, Community AS community_name FROM table`;
+  const rows = await safeQuery(EM_COMMUNITIES_DATASET, sql);
+  const map = new Map();
+  for (const r of rows) if (r.community_id) map.set(r.community_id, r.community_name || "");
+  return map;
+}
+
 // Last-30-day EM service activity, keyed by Employee_ID. Med passes attributed
 // to Given_or_Recorded_Person_ID are merged in so candidates with med-only
 // activity still show up.
@@ -192,12 +229,14 @@ export default async function handler(req, res) {
     const datasetId = await findDatasetIdByName(CROSSWALK_NAME);
     if (!datasetId) return res.status(200).json({ items: [], total: 0, summary: {} });
 
-    // Run the 4 queries in parallel — side queries are independent of crosswalk
-    const [rows, adpActivity, emActivity, emEmployees] = await Promise.all([
+    // Run side queries in parallel — they're independent of crosswalk
+    const [rows, adpActivity, emActivity, emEmployees, emSvcByCommunity, communityNames] = await Promise.all([
       queryDataset(datasetId, "SELECT * FROM table"),
       fetchAdpActivity(),
       fetchEmActivity(),
       fetchEmEmployees(),
+      fetchEmServicesByCommunity(),
+      fetchCommunityNames(),
     ]);
 
     // Pre-compute communities lookup (community_id -> name) from EM employees
@@ -278,24 +317,24 @@ export default async function handler(req, res) {
       })
       .map((emp) => {
         const act = emActivity.get(emp.em_id) || {};
-        // Try to look up Sort_Name from emEmployees — but it's not in the schema we pulled.
-        // Use a derived display name: prefer em_id-keyed services last_service for context.
-        // Actually emEmployees has Title; Sort_Name is in the raw dataset but we didn't
-        // pull it. Fall back to em_id if no name; the matcher's already-stored EM Sort_Name
-        // for this person lives in the crosswalk's em_name field for paired rows. For
-        // unmatched it doesn't exist. We'll fix this in a follow-up by pulling Sort_Name too.
-        const em_name = emp.em_name || "";  // populated below if we re-fetched
-        // Score ADP punchers by name overlap. We don't have em_name here yet —
-        // candidate scoring runs after we enrich names.
+        const byComm = emSvcByCommunity.get(emp.em_id) || [];
+        const service_communities = byComm.map((c) => ({
+          community_id: c.community_id,
+          community_name: communityNames.get(c.community_id) || c.community_id,
+          svc_hrs_30d: c.svc_hrs_30d,
+        }));
         return {
           em_employee_id: emp.em_id,
-          em_name,
+          em_name: emp.em_name || "",  // populated by the names re-fetch below
           em_title: emp.title || "",
           em_hire_date: emp.hire_date || "",
           em_home_community_id: emp.home_community_id || "",
+          em_home_community_name: communityNames.get(emp.home_community_id) || "",
           svc_hrs_30d: Number(act.svc_hrs_30d || 0),
           svc_count_30d: Number(act.svc_count_30d || 0),
           last_service: act.last_service || "",
+          service_communities,
+          primary_service_community: service_communities[0]?.community_name || "",
           adp_candidates: [],
         };
       });
