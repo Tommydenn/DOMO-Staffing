@@ -289,6 +289,30 @@
       node.querySelector(".em-meta").textContent = metaParts.join(" · ") || "(no title)";
       node.querySelector(".em-id").textContent = `EM: ${item.em_employee_id}`;
 
+      // Service-community breakdown — answers "where are these services confirmed?"
+      const idLine = node.querySelector(".em-id");
+      const commLine = document.createElement("div");
+      commLine.className = "text-xs text-slate-700 mt-1.5 flex flex-wrap items-center gap-1.5";
+      const sc = item.service_communities || [];
+      if (sc.length === 0) {
+        commLine.innerHTML = `<span class="text-slate-400 italic">No service community recorded</span>`;
+      } else {
+        const label = `<span class="text-[11px] uppercase tracking-wider text-slate-500 mr-1">Services at:</span>`;
+        const chips = sc.slice(0, 4).map((c) => {
+          const isTop = c === sc[0];
+          const cls = isTop
+            ? "bg-emerald-50 border-emerald-300 text-emerald-900"
+            : "bg-slate-50 border-slate-300 text-slate-700";
+          return `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded border ${cls}">
+            <span class="font-medium">${escapeHtml(c.community_name)}</span>
+            <span class="text-slate-500">${c.svc_hrs_30d.toFixed(0)}h</span>
+          </span>`;
+        }).join("");
+        const more = sc.length > 4 ? `<span class="text-xs text-slate-500">+${sc.length - 4} more</span>` : "";
+        commLine.innerHTML = label + chips + more;
+      }
+      idLine.parentNode.appendChild(commLine);
+
       const candsEl = node.querySelector(".adp-candidates");
       if (!item.adp_candidates || item.adp_candidates.length === 0) {
         node.querySelector(".cand-header").classList.add("hidden");
