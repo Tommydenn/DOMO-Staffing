@@ -73,11 +73,13 @@ function parseCandidates(raw) {
   }
 }
 
-// Last-30-day ADP punch activity, keyed by Associate ID
+// Last-30-day ADP punch activity, keyed by Associate ID. Includes Payroll Name
+// so the EM-unmatched view can fuzzy-match candidates by name.
 async function fetchAdpActivity() {
   const sql = `
     SELECT
       \`Associate ID\` AS adp_id,
+      MAX(\`Payroll Name\`) AS adp_name,
       ROUND(SUM(CAST(\`Hours\` AS DOUBLE)), 1) AS hours_30d,
       MAX(\`Community Name\`) AS last_community,
       MAX(\`Job Title Description\`) AS last_title,
@@ -94,6 +96,7 @@ async function fetchAdpActivity() {
   for (const r of rows) {
     if (!r.adp_id) continue;
     map.set(r.adp_id, {
+      adp_name: r.adp_name || "",
       hours_30d: Number(r.hours_30d || 0),
       last_community: r.last_community || "",
       last_title: r.last_title || "",
@@ -102,6 +105,26 @@ async function fetchAdpActivity() {
     });
   }
   return map;
+}
+
+// Token-overlap score between two name strings. Strips punctuation, lowercases,
+// splits on whitespace, returns intersection / max(set sizes). 1.0 = perfect.
+function nameTokens(name) {
+  return new Set(
+    String(name || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((t) => t.length >= 2)
+  );
+}
+function overlapScore(a, b) {
+  const ta = nameTokens(a);
+  const tb = nameTokens(b);
+  if (!ta.size || !tb.size) return 0;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  return inter / Math.max(ta.size, tb.size);
 }
 
 // EM employees profile metadata, keyed by ID. Used to mark Inactive accounts
@@ -177,6 +200,18 @@ export default async function handler(req, res) {
       fetchEmEmployees(),
     ]);
 
+    // Pre-compute communities lookup (community_id -> name) from EM employees
+    // so we can label EM-anchored cards with their home community.
+    const emEmpsArr = [...emEmployees.entries()].map(([em_id, p]) => ({ em_id, ...p }));
+    // Build set of EM ids that are already paired in the crosswalk so we can
+    // exclude them from the unmatched-EM view.
+    const pairedEmIds = new Set();
+    for (const row of rows) {
+      const adp = (row.adp_associate_id || "").trim();
+      const em = (row.em_employee_id || "").trim();
+      if (adp && em) pairedEmIds.add(em);
+    }
+
     const summary = { exact: 0, fuzzy: 0, llm: 0, "manual-review": 0, unmatched: 0, other: 0 };
     for (const row of rows) {
       const k = row.match_source || "other";
@@ -229,7 +264,91 @@ export default async function handler(req, res) {
       return (a.adp_name || "").localeCompare(b.adp_name || "");
     });
 
-    res.status(200).json({ items, total: rows.length, summary });
+    // ----- EM-anchored unmatched: EM employees performing services with no ADP match -----
+    // Materialize ADP punchers as a flat array for fuzzy candidate lookup.
+    const adpPunchers = [...adpActivity.entries()].map(([adp_id, a]) => ({ adp_id, ...a }));
+
+    const em_items = emEmpsArr
+      .filter((emp) => {
+        if (emp.inactive) return false;
+        if (pairedEmIds.has(emp.em_id)) return false;
+        const act = emActivity.get(emp.em_id);
+        if (!act || act.svc_hrs_30d <= 0) return false;
+        return true;
+      })
+      .map((emp) => {
+        const act = emActivity.get(emp.em_id) || {};
+        // Try to look up Sort_Name from emEmployees — but it's not in the schema we pulled.
+        // Use a derived display name: prefer em_id-keyed services last_service for context.
+        // Actually emEmployees has Title; Sort_Name is in the raw dataset but we didn't
+        // pull it. Fall back to em_id if no name; the matcher's already-stored EM Sort_Name
+        // for this person lives in the crosswalk's em_name field for paired rows. For
+        // unmatched it doesn't exist. We'll fix this in a follow-up by pulling Sort_Name too.
+        const em_name = emp.em_name || "";  // populated below if we re-fetched
+        // Score ADP punchers by name overlap. We don't have em_name here yet —
+        // candidate scoring runs after we enrich names.
+        return {
+          em_employee_id: emp.em_id,
+          em_name,
+          em_title: emp.title || "",
+          em_hire_date: emp.hire_date || "",
+          em_home_community_id: emp.home_community_id || "",
+          svc_hrs_30d: Number(act.svc_hrs_30d || 0),
+          svc_count_30d: Number(act.svc_count_30d || 0),
+          last_service: act.last_service || "",
+          adp_candidates: [],
+        };
+      });
+
+    // Pull Sort_Name + Community from EM employees in one go, since fetchEmEmployees
+    // didn't include them (it only had Inactive/Title/Hire_Date/Community_ID). Re-query
+    // for just the unmatched IDs to keep the payload small.
+    if (em_items.length) {
+      const idList = em_items.map((e) => `'${String(e.em_employee_id).replace(/'/g, "''")}'`).join(",");
+      const namesSql = `SELECT ID AS em_id, Sort_Name AS sort_name FROM table WHERE ID IN (${idList})`;
+      const nameRows = await safeQuery(EM_EMPLOYEES_DATASET, namesSql);
+      const nameMap = new Map();
+      for (const r of nameRows) if (r.em_id) nameMap.set(r.em_id, r.sort_name || "");
+      for (const it of em_items) {
+        it.em_name = nameMap.get(it.em_employee_id) || it.em_employee_id;
+      }
+    }
+
+    // Now score ADP candidates by token overlap on names. Suggest top 5 with score >= 0.5.
+    for (const it of em_items) {
+      const scored = [];
+      for (const p of adpPunchers) {
+        if (!p.adp_name) continue;
+        const score = overlapScore(it.em_name, p.adp_name);
+        if (score >= 0.5) {
+          scored.push({
+            adp_associate_id: p.adp_id,
+            adp_name: p.adp_name,
+            adp_title: p.last_title,
+            adp_community: p.last_community,
+            adp_dept: p.last_dept,
+            adp_hours_30d: Number(p.hours_30d || 0),
+            score,
+          });
+        }
+      }
+      scored.sort((a, b) => b.score - a.score || b.adp_hours_30d - a.adp_hours_30d);
+      it.adp_candidates = scored.slice(0, 5);
+    }
+
+    // Sort EM-anchored items: highest 30d service hours first, then by name
+    em_items.sort((a, b) => {
+      if (a.svc_hrs_30d !== b.svc_hrs_30d) return b.svc_hrs_30d - a.svc_hrs_30d;
+      return (a.em_name || "").localeCompare(b.em_name || "");
+    });
+
+    res.status(200).json({
+      items,
+      em_items,
+      total: rows.length,
+      em_total: em_items.length,
+      summary,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message || "domo query failed" });
   }
