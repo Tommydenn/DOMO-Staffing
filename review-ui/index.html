@@ -5,75 +5,82 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Employee Crosswalk Review</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .pulse-dot { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% {opacity:1} 50% {opacity:.4} }
+    .row-leaving { transition: opacity .2s, transform .2s; opacity: 0; transform: translateX(8px); }
+  </style>
 </head>
-<body class="bg-slate-50 text-slate-900">
-  <div class="max-w-6xl mx-auto p-6">
-    <header class="mb-6 flex items-end justify-between gap-4">
+<body class="bg-slate-100 text-slate-900">
+  <div class="max-w-6xl mx-auto p-4 sm:p-6">
+    <header class="mb-5 flex items-end justify-between gap-4">
       <div>
-        <h1 class="text-2xl font-semibold">Employee Crosswalk Review</h1>
-        <p class="text-sm text-slate-600">Confirm or override matches that the matcher couldn't auto-resolve.</p>
+        <h1 class="text-2xl font-semibold tracking-tight">Employee Crosswalk Review</h1>
+        <p class="text-sm text-slate-600 mt-0.5">Match ADP punches to Eldermark employees the matcher couldn't auto-resolve.</p>
       </div>
-      <button id="refresh" class="px-3 py-2 rounded bg-slate-900 text-white text-sm">Refresh</button>
+      <button id="refresh" class="px-3 py-2 rounded-md bg-slate-900 text-white text-sm font-medium hover:bg-slate-700 active:bg-slate-800">Refresh</button>
     </header>
 
     <section id="summary" class="mb-4 grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs"></section>
 
-    <section class="mb-4 flex flex-wrap items-center gap-2 bg-white rounded shadow p-3">
+    <section class="mb-5 flex flex-wrap items-center gap-2 bg-white rounded-lg shadow-sm border border-slate-200 p-3">
       <div class="flex gap-1 mr-2">
-        <button data-tab="manual-review" class="tab-btn px-3 py-1.5 rounded text-sm bg-slate-900 text-white">Manual review</button>
-        <button data-tab="unmatched" class="tab-btn px-3 py-1.5 rounded text-sm bg-slate-100 text-slate-700">Unmatched</button>
-        <button data-tab="all" class="tab-btn px-3 py-1.5 rounded text-sm bg-slate-100 text-slate-700">All</button>
+        <button data-tab="manual-review" class="tab-btn px-3 py-1.5 rounded-md text-sm font-medium bg-slate-900 text-white">Manual review</button>
+        <button data-tab="unmatched" class="tab-btn px-3 py-1.5 rounded-md text-sm font-medium bg-slate-100 text-slate-700 hover:bg-slate-200">Unmatched</button>
+        <button data-tab="all" class="tab-btn px-3 py-1.5 rounded-md text-sm font-medium bg-slate-100 text-slate-700 hover:bg-slate-200">All</button>
       </div>
-      <input id="search" type="search" placeholder="Search by name, community, title..."
-             class="flex-1 min-w-48 border rounded px-3 py-1.5 text-sm" />
-      <select id="dept-filter" class="border rounded px-2 py-1.5 text-sm">
+      <input id="search" type="search" placeholder="Search by name, community, title…"
+             class="flex-1 min-w-48 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-slate-300 focus:outline-none" />
+      <select id="dept-filter" class="border border-slate-300 rounded-md px-2 py-1.5 text-sm">
         <option value="">All departments</option>
       </select>
-      <select id="comm-filter" class="border rounded px-2 py-1.5 text-sm">
+      <select id="comm-filter" class="border border-slate-300 rounded-md px-2 py-1.5 text-sm">
         <option value="">All communities</option>
       </select>
       <span id="visible-count" class="text-xs text-slate-500 ml-auto"></span>
     </section>
 
-    <div id="rows" class="space-y-3"></div>
+    <div id="groups" class="space-y-6"></div>
     <p id="empty" class="hidden text-center text-slate-500 mt-12 text-sm">No items match the current filters.</p>
+    <p class="text-xs text-slate-400 text-center mt-10">Activity badges show last 30 days. <span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle"></span> recent · faded = stale</p>
   </div>
 
   <template id="row-tmpl">
-    <article class="row bg-white rounded shadow p-4">
+    <article class="row bg-white rounded-lg shadow-sm border border-slate-200 p-4 hover:shadow-md hover:border-slate-300 transition-all">
       <div class="flex items-start justify-between gap-4">
-        <div>
-          <div class="flex items-center gap-2">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
             <h2 class="adp-name text-lg font-medium"></h2>
-            <span class="source-tag inline-block px-2 py-0.5 text-xs rounded"></span>
+            <span class="source-tag inline-block px-2 py-0.5 text-xs font-medium rounded"></span>
+            <span class="activity-30d inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded font-medium"></span>
           </div>
-          <div class="adp-meta text-xs text-slate-500 mt-1"></div>
+          <div class="adp-meta text-xs text-slate-600 mt-1"></div>
           <div class="adp-id text-xs text-slate-400 font-mono mt-0.5"></div>
         </div>
       </div>
 
       <div class="mt-3">
-        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1.5 cand-header">Suggested Eldermark matches</div>
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1.5 cand-header font-semibold">Suggested Eldermark matches</div>
         <div class="candidates space-y-1.5"></div>
         <p class="no-cands hidden text-xs text-slate-500 italic mt-1">No fuzzy candidates above threshold — likely an ADP-only role with no Eldermark equivalent. You can mark "no match" or paste an EM ID below.</p>
       </div>
 
       <details class="mt-3 text-xs text-slate-600 notes-block">
-        <summary class="cursor-pointer text-slate-500">Matcher notes</summary>
+        <summary class="cursor-pointer text-slate-500 hover:text-slate-700">Matcher notes</summary>
         <div class="mt-1 notes-body"></div>
       </details>
 
       <div class="mt-3 flex flex-wrap gap-2 items-center">
-        <input class="manual-id border rounded px-2 py-1 text-sm flex-1 min-w-40 font-mono"
-               placeholder="Or paste an EM employee_id..." />
-        <button class="confirm-btn px-3 py-1 rounded bg-emerald-600 text-white text-sm">Confirm ID</button>
-        <button class="reject-btn px-3 py-1 rounded bg-rose-600 text-white text-sm">No match</button>
+        <input class="manual-id border border-slate-300 rounded-md px-2 py-1 text-sm flex-1 min-w-40 font-mono focus:ring-2 focus:ring-slate-300 focus:outline-none"
+               placeholder="Or paste an EM employee_id…" />
+        <button class="confirm-btn px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium">Confirm ID</button>
+        <button class="reject-btn px-3 py-1.5 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-sm font-medium">No match</button>
       </div>
     </article>
   </template>
 
   <script>
-    const rowsEl = document.getElementById("rows");
+    const groupsEl = document.getElementById("groups");
     const summaryEl = document.getElementById("summary");
     const emptyEl = document.getElementById("empty");
     const tmpl = document.getElementById("row-tmpl");
@@ -102,11 +109,12 @@
     };
 
     async function load() {
-      summaryEl.innerHTML = "Loading...";
+      summaryEl.innerHTML = `<div class="col-span-full text-slate-500 text-sm py-2">Loading…</div>`;
+      groupsEl.innerHTML = "";
       const res = await fetch("/api/pending");
       const data = await res.json();
       if (!res.ok) {
-        summaryEl.innerHTML = `<div class="col-span-full bg-rose-50 text-rose-700 p-3 rounded">${data.error || res.statusText}</div>`;
+        summaryEl.innerHTML = `<div class="col-span-full bg-rose-50 text-rose-700 p-3 rounded-md border border-rose-200">${data.error || res.statusText}</div>`;
         return;
       }
       _items = data.items || [];
@@ -122,8 +130,8 @@
         const [label, cls] = SUMMARY_LABELS[k];
         const n = summary[k] || 0;
         const div = document.createElement("div");
-        div.className = `${cls} p-2 rounded`;
-        div.innerHTML = `<div class="font-semibold text-sm">${n.toLocaleString()}</div><div>${label}</div>`;
+        div.className = `${cls} px-3 py-2 rounded-md`;
+        div.innerHTML = `<div class="font-semibold text-base leading-tight">${n.toLocaleString()}</div><div class="text-xs mt-0.5">${label}</div>`;
         summaryEl.appendChild(div);
       }
     }
@@ -135,7 +143,8 @@
         if (it.adp_community) comms.add(it.adp_community);
       }
       function fill(el, vals, kept) {
-        el.innerHTML = `<option value="">${el.options[0].text}</option>`;
+        const head = el.options[0].text;
+        el.innerHTML = `<option value="">${head}</option>`;
         [...vals].sort().forEach(v => {
           const o = document.createElement("option");
           o.value = v; o.textContent = v;
@@ -165,20 +174,67 @@
       });
 
       visibleCountEl.textContent = `${filtered.length.toLocaleString()} shown`;
-      rowsEl.innerHTML = "";
+      groupsEl.innerHTML = "";
       emptyEl.classList.toggle("hidden", filtered.length > 0);
-      for (const it of filtered) renderRow(it);
+
+      // Group by community
+      const buckets = new Map();
+      for (const it of filtered) {
+        const key = it.adp_community || "(no community)";
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(it);
+      }
+
+      for (const [community, list] of buckets) {
+        const section = document.createElement("section");
+        section.className = "community-group";
+        const header = document.createElement("div");
+        header.className = "flex items-center gap-2 mb-2 px-1";
+        header.innerHTML = `
+          <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-700">${escapeHtml(community)}</h3>
+          <div class="flex-1 border-t border-slate-300"></div>
+          <span class="text-xs text-slate-500 font-medium">${list.length} ${list.length === 1 ? "person" : "people"}</span>
+        `;
+        section.appendChild(header);
+        const rowsWrap = document.createElement("div");
+        rowsWrap.className = "space-y-2";
+        for (const it of list) renderRow(it, rowsWrap);
+        section.appendChild(rowsWrap);
+        groupsEl.appendChild(section);
+      }
     }
 
-    function renderRow(item) {
+    function escapeHtml(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+    }
+
+    function activityBadge(hours, kind /* "punch" | "service" */) {
+      // hours: numeric hours in last 30 days. kind drives wording.
+      const isActive = hours > 0;
+      if (!isActive) {
+        return `<span class="px-2 py-0.5 text-xs rounded bg-slate-100 text-slate-500">No ${kind === "punch" ? "punches" : "services"} 30d</span>`;
+      }
+      const cls = hours >= 40 ? "bg-emerald-100 text-emerald-800" : "bg-emerald-50 text-emerald-700";
+      const dot = `<span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>`;
+      const label = kind === "punch" ? "punch hrs" : "svc hrs";
+      return `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded ${cls} font-medium">${dot}${hours.toFixed(0)} ${label} 30d</span>`;
+    }
+
+    function renderRow(item, container) {
       const node = tmpl.content.cloneNode(true);
       const row = node.querySelector(".row");
       row.dataset.adpId = item.adp_associate_id;
-      node.querySelector(".adp-name").textContent = item.adp_name;
+      node.querySelector(".adp-name").textContent = item.adp_name || "(no name)";
       const tag = node.querySelector(".source-tag");
       tag.textContent = item.match_source;
-      tag.className = `source-tag inline-block px-2 py-0.5 text-xs rounded ${SOURCE_PILL[item.match_source] || "bg-slate-100"}`;
-      const metaParts = [item.adp_title, item.adp_department, item.adp_community].filter(Boolean);
+      tag.className = `source-tag inline-block px-2 py-0.5 text-xs font-medium rounded ${SOURCE_PILL[item.match_source] || "bg-slate-100"}`;
+
+      // 30-day activity badge for ADP person
+      const actEl = node.querySelector(".activity-30d");
+      const punchH = Number(item.adp_hours_30d || 0);
+      actEl.outerHTML = activityBadge(punchH, "punch");
+
+      const metaParts = [item.adp_title, item.adp_department].filter(Boolean);
       if (item.adp_ytd_hours) metaParts.push(`${item.adp_ytd_hours.toFixed(0)}h YTD`);
       node.querySelector(".adp-meta").textContent = metaParts.join(" · ") || "(no ADP context)";
       node.querySelector(".adp-id").textContent = `ADP: ${item.adp_associate_id}`;
@@ -188,8 +244,10 @@
         node.querySelector(".cand-header").classList.add("hidden");
         node.querySelector(".no-cands").classList.remove("hidden");
       } else {
-        // Sort: active candidates first (more YTD services); then by score
+        // Sort: 30-day-active first; then YTD; then score
         const sorted = [...item.candidates].sort((a, b) => {
+          const a30 = Number(a.svc_hrs_30d || 0), b30 = Number(b.svc_hrs_30d || 0);
+          if (a30 !== b30) return b30 - a30;
           const ay = Number(a.ytd_services || 0), by = Number(b.ytd_services || 0);
           if (ay !== by) return by - ay;
           return Number(b.score || 0) - Number(a.score || 0);
@@ -197,17 +255,27 @@
         for (const c of sorted) {
           const btn = document.createElement("button");
           const ytd = Number(c.ytd_services || 0);
-          const ytdCls = ytd > 0 ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-500";
-          const isStale = ytd === 0;
-          btn.className = `w-full text-left border rounded px-3 py-2 text-sm hover:bg-emerald-50 hover:border-emerald-300 ${isStale ? "opacity-60" : ""}`;
+          const svc30 = Number(c.svc_hrs_30d || 0);
+          const cnt30 = Number(c.svc_count_30d || 0);
+          const isStale = svc30 === 0 && ytd === 0;
+          const score = Number(c.score || 0);
+          btn.className = `w-full text-left border rounded-md px-3 py-2 text-sm hover:bg-emerald-50 hover:border-emerald-400 ${isStale ? "opacity-50 border-slate-200" : "border-slate-300"}`;
+          const dot = svc30 > 0 ? `<span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>` : "";
+          const recentBadge = svc30 > 0
+            ? `<span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-medium">${dot}${svc30.toFixed(0)} svc hrs 30d</span>`
+            : `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">No svc 30d</span>`;
+          const ytdBadge = ytd > 0
+            ? `<span class="text-xs text-slate-500">${ytd.toLocaleString()} svc YTD</span>`
+            : "";
           btn.innerHTML = `<div class="flex items-baseline justify-between gap-3">
-            <div>
-              <span class="font-medium">${c.em_name || "—"}</span>
-              <span class="text-xs text-slate-400 font-mono ml-2">${c.em_employee_id || ""}</span>
+            <div class="min-w-0 flex-1">
+              <span class="font-medium">${escapeHtml(c.em_name || "—")}</span>
+              <span class="text-xs text-slate-400 font-mono ml-2">${escapeHtml(c.em_employee_id || "")}</span>
             </div>
-            <div class="flex gap-2 items-baseline">
-              <span class="text-xs px-1.5 py-0.5 rounded ${ytdCls}">${ytd.toLocaleString()} svc YTD</span>
-              <span class="text-xs text-slate-500">${(Number(c.score || 0) * 100).toFixed(0)}%</span>
+            <div class="flex gap-2 items-baseline shrink-0">
+              ${recentBadge}
+              ${ytdBadge}
+              <span class="text-xs text-slate-500">${(score * 100).toFixed(0)}%</span>
             </div>
           </div>`;
           btn.onclick = () => decide(item.adp_associate_id, c.em_employee_id, "confirmed", row);
@@ -228,7 +296,7 @@
       };
       node.querySelector(".reject-btn").onclick = () => decide(item.adp_associate_id, null, "rejected", row);
 
-      rowsEl.appendChild(node);
+      container.appendChild(node);
     }
 
     async function decide(adp_id, em_id, decision, row) {
@@ -239,9 +307,14 @@
         body: JSON.stringify({ adp_associate_id: adp_id, em_employee_id: em_id, decision }),
       });
       if (res.ok) {
-        row.style.transition = "opacity .2s";
-        row.style.opacity = "0";
-        setTimeout(() => row.remove(), 200);
+        row.classList.add("row-leaving");
+        setTimeout(() => {
+          row.remove();
+          // Remove an entire community group if it just emptied out
+          document.querySelectorAll(".community-group").forEach((g) => {
+            if (!g.querySelector(".row")) g.remove();
+          });
+        }, 220);
       } else {
         row.classList.remove("opacity-50", "pointer-events-none");
         const err = await res.json().catch(() => ({}));
@@ -257,7 +330,7 @@
       _activeTab = btn.dataset.tab;
       tabBtns.forEach(b => {
         const active = b === btn;
-        b.className = `tab-btn px-3 py-1.5 rounded text-sm ${active ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"}`;
+        b.className = `tab-btn px-3 py-1.5 rounded-md text-sm font-medium ${active ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`;
       });
       renderList();
     }));

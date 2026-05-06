@@ -92,6 +92,7 @@ def _resolve_pending_with_llm(
 def _build_crosswalk_rows(
     results: list[matcher.MatchResult],
     adp_workers_by_id: dict[str, "matcher.AdpWorker"] | None = None,
+    em_ytd_by_id: dict[str, int] | None = None,
 ) -> tuple[list[dict], list[str]]:
     import json as _json
     today = date.today().isoformat()
@@ -114,6 +115,7 @@ def _build_crosswalk_rows(
         "notes",
     ]
     by_id = adp_workers_by_id or {}
+    em_ytd = em_ytd_by_id or {}
     rows: list[dict] = []
     for r in results:
         unified = r.em_employee_id if r.em_employee_id else f"ADP:{r.adp_associate_id}"
@@ -128,13 +130,17 @@ def _build_crosswalk_rows(
             }
             for c in (r.candidates or [])
         ]
-        # em_ytd_services for the chosen match: pull from the matching candidate if available
+        # em_ytd_services for the chosen match: pull from the matching candidate if
+        # available (LLM/manual rows have candidates), otherwise look up directly from
+        # the EM activity map (exact/fuzzy auto-confirms have no candidates list).
         chosen_ytd = 0
-        if r.em_employee_id and cand_objs:
+        if r.em_employee_id:
             for c in cand_objs:
                 if c["em_employee_id"] == r.em_employee_id:
                     chosen_ytd = c["ytd_services"]
                     break
+            else:
+                chosen_ytd = int(em_ytd.get(r.em_employee_id, 0))
         rows.append({
             "unified_employee_id": unified,
             "adp_associate_id": r.adp_associate_id,
@@ -183,7 +189,8 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
     if args.with_llm:
         _resolve_pending_with_llm(results, by_id)
     _print_stats(results)
-    rows, columns = _build_crosswalk_rows(results, by_id)
+    em_ytd = {e.em_employee_id: e.ytd_services for e in em_employees}
+    rows, columns = _build_crosswalk_rows(results, by_id, em_ytd)
     out_path = OUTPUT_DIR / f"crosswalk_dryrun_{date.today().isoformat()}.csv"
     pd.DataFrame(rows, columns=columns).to_csv(out_path, index=False)
     print(f"\nDry-run crosswalk written to {out_path}")
@@ -210,7 +217,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     by_id = {w.adp_associate_id: w for w in adp_workers}
     _resolve_pending_with_llm(results, by_id)
     _print_stats(results)
-    rows, columns = _build_crosswalk_rows(results, by_id)
+    em_ytd = {e.em_employee_id: e.ytd_services for e in em_employees}
+    rows, columns = _build_crosswalk_rows(results, by_id, em_ytd)
     print(f"Uploading {len(rows)} rows to dataset {cw_id}...", file=sys.stderr)
     client.replace_dataset_csv(cw_id, rows, columns)
     print("Done.")
