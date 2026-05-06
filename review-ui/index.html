@@ -244,8 +244,10 @@
         node.querySelector(".cand-header").classList.add("hidden");
         node.querySelector(".no-cands").classList.remove("hidden");
       } else {
-        // Sort: 30-day-active first; then YTD; then score
+        // Sort: active EM accounts first, then 30-day activity, then YTD, then score.
+        // Inactive duplicates sink to the bottom so the right one is at the top.
         const sorted = [...item.candidates].sort((a, b) => {
+          if (!!a.inactive !== !!b.inactive) return a.inactive ? 1 : -1;
           const a30 = Number(a.svc_hrs_30d || 0), b30 = Number(b.svc_hrs_30d || 0);
           if (a30 !== b30) return b30 - a30;
           const ay = Number(a.ytd_services || 0), by = Number(b.ytd_services || 0);
@@ -256,23 +258,43 @@
           const btn = document.createElement("button");
           const ytd = Number(c.ytd_services || 0);
           const svc30 = Number(c.svc_hrs_30d || 0);
-          const cnt30 = Number(c.svc_count_30d || 0);
           const isStale = svc30 === 0 && ytd === 0;
+          const isInactive = !!c.inactive;
           const score = Number(c.score || 0);
-          btn.className = `w-full text-left border rounded-md px-3 py-2 text-sm hover:bg-emerald-50 hover:border-emerald-400 ${isStale ? "opacity-50 border-slate-200" : "border-slate-300"}`;
+          // Inactive overrides the stale styling: red ring + 60% opacity so it's clearly demoted
+          let frame = "border-slate-300";
+          let opacity = "";
+          if (isInactive) {
+            frame = "border-rose-300 bg-rose-50/40";
+            opacity = "opacity-70";
+          } else if (isStale) {
+            frame = "border-slate-200";
+            opacity = "opacity-50";
+          }
+          btn.className = `w-full text-left border rounded-md px-3 py-2 text-sm hover:bg-emerald-50 hover:border-emerald-400 ${frame} ${opacity}`;
           const dot = svc30 > 0 ? `<span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>` : "";
+          const inactiveBadge = isInactive
+            ? `<span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 font-semibold">Inactive</span>`
+            : "";
           const recentBadge = svc30 > 0
             ? `<span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-medium">${dot}${svc30.toFixed(0)} svc hrs 30d</span>`
             : `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">No svc 30d</span>`;
           const ytdBadge = ytd > 0
             ? `<span class="text-xs text-slate-500">${ytd.toLocaleString()} svc YTD</span>`
             : "";
+          const titleLine = c.em_title
+            ? `<div class="text-xs text-slate-500 mt-0.5">${escapeHtml(c.em_title)}${c.em_hire_date ? ` · hired ${escapeHtml(String(c.em_hire_date).slice(0, 10))}` : ""}</div>`
+            : "";
           btn.innerHTML = `<div class="flex items-baseline justify-between gap-3">
             <div class="min-w-0 flex-1">
-              <span class="font-medium">${escapeHtml(c.em_name || "—")}</span>
-              <span class="text-xs text-slate-400 font-mono ml-2">${escapeHtml(c.em_employee_id || "")}</span>
+              <div>
+                <span class="font-medium">${escapeHtml(c.em_name || "—")}</span>
+                <span class="text-xs text-slate-400 font-mono ml-2">${escapeHtml(c.em_employee_id || "")}</span>
+              </div>
+              ${titleLine}
             </div>
-            <div class="flex gap-2 items-baseline shrink-0">
+            <div class="flex gap-2 items-baseline shrink-0 flex-wrap justify-end">
+              ${inactiveBadge}
               ${recentBadge}
               ${ytdBadge}
               <span class="text-xs text-slate-500">${(score * 100).toFixed(0)}%</span>
