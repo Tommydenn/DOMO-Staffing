@@ -61,20 +61,21 @@ Two-part system for Great Lakes Management / HGSA staffing efficiency:
 ## DF205 architecture (Magic ETL)
 
 URL: https://greatlakesmc.domo.com/datacenter/dataflows/205/graph
-Current version at handoff: **v20 / 5039** (auto-run on prior v5038 in flight at handoff time)
+Current version at handoff: **v5042** (live, SUCCESS, dataVersion 47, 7,331,636 rows)
 
 Outputs a single dataset with two row types:
 - **`Row_Type='Hour'`** — community × date × hour aggregate (legacy RA-staffing card grain). Service totals correct here.
 - **`Row_Type='Detail'`** — per (community_id, date, hour, associate, employee). All-staff with department, job title, TWDD-derived community_worked_in, plus `match_status`, `med_minutes_employee`.
 
-### Tile chain (32 tiles)
+### Tile chain (34 tiles)
 - `sql-01..03` — RA-only chain (legacy compat)
-- `sql-04 staff_punches` → `sql-05 staff_hourly` — all-staff punch hour-grain
+- `sql-04 staff_punches` → `sql-05 staff_hourly` — all-staff punch hour-grain. v5041 added pay code / rate type bucket columns flowing through.
 - `sql-07 comm_bridge` — `(community_id, community_name)` from occupancy. **The bridge** between ADP-side names (in punches) and EM-side IDs (in services).
-- `sql-06 staff_detail` — Detail-row producer. Two UNION branches (A: staff with optional svc/med joined; B: matched-EM care work where matched-ADP wasn't punched at that community).
-- `sql-10 svc_base` → `sql-11 svc_agg` (Hour-grain svc) + `sql-12 svc_by_employee` (community + em_employee + adp_associate grain)
-- `sql-13 svc_unmatched` — EM services where the EM employee isn't in the crosswalk. Emits Detail rows with synthetic `associate_id='EM:'+em_employee_id`. **Derives `dept_worked` from EM `Title`** (RA/CNA/HHA/Caregiver → Resident Assistants Staff; RN/LPN/DON/MA → Nursing Staff; Housekeep* → Housekeeping Staff; ED/BOM/etc → Management Office Staff).
-- `sql-20 med_base` → `sql-21 med_agg` + `sql-22 med_by_employee` + `sql-23 med_unmatched` — same shape as svc tiles, for med passes (estimated 2 min per pass). sql-23 also derives dept_worked from Title.
+- `sql-06 staff_detail` — Detail-row producer. Two UNION branches (A: staff with optional svc/med joined; B: matched-EM care work where matched-ADP wasn't punched at that community). v5040: Branch B derives dept_worked from EM Title. v5041: pay/rate buckets. v5042: provider_* columns from sql-12.
+- `sql-08 provider_dim` — **NEW v5042**. EM Service Providers catalog from `c028ecfe-...`, MAX'd per `(community_id, provider_code)`. Outputs `provider_name`, `provider_category` (mostly empty in source), `provider_billing_rate`.
+- `sql-10 svc_base` → `sql-11 svc_agg` (Hour-grain svc) + `sql-12 svc_by_employee` (community + em_employee + adp_associate grain). v5042: sql-10 carries `provider_code`, sql-12 LEFT JOINs `provider_dim` and MAX's the provider_* cols.
+- `sql-13 svc_unmatched` — EM services where the EM employee isn't in the crosswalk. Emits Detail rows with synthetic `associate_id='EM:'+em_employee_id`. **Derives `dept_worked` from EM `Title`** (RA/CNA/HHA/Caregiver → Resident Assistants Staff; RN/LPN/DON/MA → Nursing Staff; Housekeep* → Housekeeping Staff; ED/BOM/etc → Management Office Staff). v5042: also brings in provider_*.
+- `sql-20 med_base` → `sql-21 med_agg` + `sql-22 med_by_employee` + `sql-23 med_unmatched` — same shape as svc tiles, for med passes (estimated 2 min per pass). sql-23 also derives dept_worked from Title. **No provider info** — `med_delivery` source has no Provider column.
 - `sql-99 final_output` — UNION of Hour rows + sql-06 Detail rows + sql-13 unmatched-EM-svc rows + sql-23 unmatched-EM-med rows. Adds `match_status` column ('Matched' / 'ADP unlinked' / 'EM unlinked').
 
 ### The four Detail-row sources (covers ALL care work)
@@ -91,10 +92,23 @@ Sum of `(svc_minutes_employee + med_minutes_employee)/60` across all four == raw
 - Occupancy has BOTH — that's why it's the bridge
 - `community_worked_in` in Branch A: TWDD output, normalized via `comm_bridge` lookup using `LOWER(REGEXP_REPLACE(name, '[^A-Za-z0-9]', ''))` — handles "AMIRA CHOICE - ARVADA" vs "AMIRA CHOICE ARVADA"
 - `community_worked_in` in Branch B + sql-13 + sql-23: `comm_bridge.community_name` (canonical ADP-side)
+- **Provider join (v5042)**: `svc_received.Provider` ↔ `Service_Providers.Code`, **scoped by Community_ID** (same code can mean different things in different communities). `svc_received.Service_Type` is NOT the provider code — it's a separate Service Type ID.
+
+## Output columns added in v5040–v5042 (all additive, no grain change)
+
+**v5041 — pay code / rate type:**
+- Categoricals (MAX per punch): `pay_code`, `timecard_pay_code`, `rate_type_category`, `regular_pay_rate_amount`
+- Hour buckets (proportional split, sum to `staff_hours_worked`): `regular_hours`, `overtime_hours`, `pto_hours`, `unpaid_hours`, `training_hours`, `double_time_hours`, `other_hours`
+
+**v5042 — Service Providers join (svc-side rows only; NULL on Hour rows + med_unmatched):**
+- `provider_name` (e.g. "Nurse", "AM AL RA", "NOC MC Med Passer")
+- `provider_category` (mostly empty in source data)
+- `provider_billing_rate` (DOUBLE; Nurse=$120, RA roles=$50)
 
 ## Cards to know
 
-- **#1735745257 "Last Month Efficiency by Community by Employee"** — primary all-staff card, reads DF205 Detail rows. Row dims: Community → Match Status → Employee. Columns: Hours Worked (ADP), Service Hours (EM = svc + med), Med Pass Hours, Efficiency. Tommy may also have added `dept_worked` as a 4th row dim.
+- **#1735745257 "Last Month Efficiency by Community by Employee"** — primary all-staff card, reads DF205 Detail rows. Row dims: Community → Match Status → Employee. Columns: Hours Worked (ADP), Service Hours (EM = svc + med), Med Pass Hours, Efficiency.
+- **#1046798988 "Nursing Productivity by Community"** — created 2026-05-07. Pivot by community → dept_worked, with `percentOfTotal: true` to show nursing share visually. Last-month filter. On page 826293561 ("NEW - Staffing Dashboard"). Tommy needs to add explicit "% Nursing Worked" / "% Nursing Received" beastmodes via Analyzer UI (API can't create new card-level formulas — see API gotchas below).
 - **#463035702 "Staffing Efficiency Comparison"** — legacy community-level RA-only card, reads Hour rows. Used as the verification benchmark.
 
 ## Conventions
@@ -104,6 +118,7 @@ Sum of `(svc_minutes_employee + med_minutes_employee)/60` across all four == raw
 - **Edit ETL via source-of-truth**: edit `matcher/df205_pivot.py`, regenerate JSON, push via `mcp__Domo_ETL__update_dataflow(dataflow_id=205, actions=...)`. Pass actions inline.
 - **Card update via direct API**: `update_card` tool returns 405; use `domo_api_request` with `PUT /api/content/v1/cards/{id}` and the FULL card body (no partial patches).
 - **Inline-paste corruption is real**: when pasting 50KB+ JSON, the model sometimes hallucinates extra clauses. Always verify push response by querying back the pushed body for known-corruption patterns: `LOWER(COALESCE(Hours_*, 'false'), 'false')` (wrong sql-40), `FROM \`svc_unmatched\` u` at the END of sql-99 (should be `med_unmatched mu`).
+- **NEW card-level beastmodes can NOT be created via API**: PUT to `/api/content/v1/cards/{id}` with a new formula in `formulas.formulas.{id}` silently strips the new entry — `templateId` is server-assigned during Analyzer UI creation. Existing formulas can be referenced or modified, but creation must be in the UI. Dataset-level formulas PUT to `/api/data/v3/datasources/{id}/formulas` returns 403 even for owner. **Workaround**: add useful aggregations as columns in the dataflow output (e.g. v5041 hour buckets, v5042 provider columns), then card-level math becomes plain SUM/aggregation on real columns.
 
 ## Where we left off
 
@@ -119,29 +134,24 @@ Sum of `(svc_minutes_employee + med_minutes_employee)/60` across all four == raw
   - PR #9: 30d activity badges, community grouping, fix-No-match-400 (`decide.js` was crashing on empty new Decisions dataset)
   - PR #10: Inactive flag on EM candidates + EM-unmatched tab (reverse-direction review)
   - PR #11: Service-community chips on EM cards (where the EM person's services are landing)
-- **2026-05-07 — EM Title → dept_worked mapping (in flight, v20 / 5039)**:
-  - Tommy filtered card by `dept_worked` (Housekeeping / Nursing / RA), but EM-unlinked rows had `dept_worked = NULL/'unmapped'` so they fell out of the filter.
-  - Fix: sql-13 + sql-23 now derive `dept_worked` from EM `Title` (RA/CNA/HHA/Caregiver → Resident Assistants Staff; RN/LPN/DON/MA → Nursing Staff; Housekeep* → Housekeeping Staff; etc.)
-  - sql-99 unmatched UNION branches now pass through `u.dept_worked` / `mu.dept_worked` instead of NULL.
-  - Pushed v20/5039. Auto-run on prior v5038 was in progress at handoff (so v5039 hadn't run yet).
-  - **Pending verify**: trigger DF205 (should run on v5039) and confirm Caretta Holmen EM-unlinked rows now show under "Resident Assistants Staff" / "Nursing Staff" instead of "unmapped".
+- **2026-05-07 morning — EM Title → dept_worked (v5039)**: sql-13 + sql-23 derive dept_worked from EM Title. v5039 ran clean.
+- **2026-05-07 afternoon — three more pushes, all live and verified, all on PR #12 (open, awaiting merge to main)**:
+  - **v5040 — Branch B EM Title fix** (commit `2daa8d4`). sql-06 Branch B was still emitting `'unmapped'`; same Title CASE applied. Caretta Holmen Apr 2026 Matched/unmapped: 1,278 em hrs → 18 em hrs (recovered to RA + Nursing).
+  - **v5041 — pay code / rate type bucket columns** (commit `a16acf1`). 11 additive columns (4 categoricals + 7 hour buckets). Bucket sums = staff_hours_worked within ~0.05%. Caretta Holmen unpaid_hours = 157 hrs / $0 paid.
+  - **v5042 — EM Service Providers join** (commit `941be9b`). Joined `c028ecfe-b470-43cb-bd9a-bf0f8de0abbe` on (Community_ID, Provider Code). Adds `provider_name` / `provider_category` / `provider_billing_rate`. 14 distinct providers at Caretta Holmen, Nurse @ $120/hr, RA roles @ $50/hr.
+  - **New card #1046798988 "Nursing Productivity by Community"** — pivot by community → dept_worked with percentOfTotal. On page 826293561.
+  - **API limitation discovered**: card-level beastmode CREATION via PUT silently fails (templateId is server-assigned). Documented in Conventions.
 
 ## Pickup checklist for new chat
 
-1. Read this file + memory index (auto-loaded)
-2. Verify v5039 ran successfully and EM-unlinked rows have populated `dept_worked`:
-   ```sql
-   SELECT match_status, dept_worked, COUNT(*), ROUND(SUM(svc_minutes_employee + med_minutes_employee) / 60.0, 1) AS svc_hrs
-   FROM table
-   WHERE Row_Type='Detail' AND month_start='2026-04-01' AND community_id='119'
-     AND match_status='EM unlinked'
-   GROUP BY 1, 2
-   ```
-3. If still showing 'unmapped' for EM unlinked, the run hasn't picked up v5039 yet — trigger it.
-4. Confirm with Tommy that filtering card #1735745257 by dept_worked = 'Resident Assistants Staff' now includes the EM-unlinked RA folks.
+1. Read this file + memory index (auto-loaded).
+2. **Check PR #12 status** at https://github.com/Tommydenn/DOMO-Staffing/pull/12. If merged, branch `claude/intelligent-kilby-1467f4` can be deleted. If not merged yet, that's still the working branch.
+3. **Tommy still owes UI work** on card #1046798988: add explicit "% Nursing Worked" and "% Nursing Received" beastmodes via Analyzer UI (formulas in PR description). Check whether he did it; if not, gentle nudge.
+4. **Output dataset has new columns** worth using in cards: pay/rate buckets (v5041), provider_name/category/billing_rate (v5042). Tommy can build revenue-validation cards: `SUM(svc_minutes_employee/60.0 * provider_billing_rate)` should reconcile against `svc_revenue_month`.
 
 ## Open questions / TODOs
 - Clarify `.jsx` → `index.html` workflow
 - Confirm Vercel project name for the dashboard
 - Tommy: clean up TWDD webform inconsistencies long-term (the regex normalization is a safety net, not a substitute)
-- Source-of-truth `matcher/df205_pivot.py` has uncommitted changes (med_passes, match_status, EM Title mapping). Commit when convenient — the dataflow is already live with the right SQL, but the script needs to match.
+- PR #12 needs review/merge.
+- **Med pass provider attribution**: `med_delivery` source has no Provider column, so med_unmatched and med_by_employee paths can't get provider_*. Acceptable since med passes are a smaller slice; revisit only if needed.
