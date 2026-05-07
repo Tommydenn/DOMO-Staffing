@@ -149,12 +149,27 @@ SQL_10_SVC_BASE = """SELECT
   s.Amount_Billed AS svc_amount_billed,
   s.Res_Number,
   s.Employee_ID,
+  s.Provider AS provider_code,
   LOWER(COALESCE(s.Covered, 'true')) AS covered_flag
 FROM `svc_received` s
 WHERE s.Minutes_of_Service_Actual > 0
   AND (s.Canceled_Code IS NULL OR s.Canceled_Code = '')
   AND s.Service_Date IS NOT NULL
   AND s.Actual_Service_Start_Time IS NOT NULL"""
+
+
+# Provider catalog from EM. (community_id, provider_code) is unique per active provider.
+# Joined via svc_received.Provider == providers.Code (within same Community_ID).
+SQL_08_PROVIDERS = """SELECT
+  CAST(Community_ID AS STRING) AS community_id,
+  Code AS provider_code,
+  MAX(Name) AS provider_name,
+  MAX(Category) AS provider_category,
+  MAX(CAST(Hourly_Billing_Rate AS DOUBLE)) AS provider_billing_rate
+FROM `service_providers`
+WHERE Code IS NOT NULL
+  AND Code != ''
+GROUP BY 1, 2"""
 
 
 SQL_11_SVC_AGG = """SELECT
@@ -391,10 +406,16 @@ SQL_12_SVC_BY_EMPLOYEE = """SELECT
   s.report_date,
   s.hour_of_day,
   SUM(s.svc_minutes) AS svc_minutes_employee,
-  COUNT(*) AS svc_count_employee
+  COUNT(*) AS svc_count_employee,
+  MAX(p.provider_name) AS provider_name,
+  MAX(p.provider_category) AS provider_category,
+  MAX(p.provider_billing_rate) AS provider_billing_rate
 FROM `svc_base` s
 INNER JOIN `crosswalk` c ON c.em_employee_id = s.Employee_ID
 LEFT JOIN `em_employees` emp ON emp.ID = s.Employee_ID
+LEFT JOIN `provider_dim` p
+  ON p.community_id = s.community_id
+  AND p.provider_code = s.provider_code
 WHERE c.em_employee_id IS NOT NULL
   AND c.em_employee_id != ''
   AND c.adp_associate_id IS NOT NULL
@@ -469,12 +490,18 @@ SQL_13_SVC_UNMATCHED = """SELECT
     ELSE 'unmapped'
   END AS dept_worked,
   SUM(s.svc_minutes) AS svc_minutes_employee,
-  COUNT(*) AS svc_count_employee
+  COUNT(*) AS svc_count_employee,
+  MAX(p.provider_name) AS provider_name,
+  MAX(p.provider_category) AS provider_category,
+  MAX(p.provider_billing_rate) AS provider_billing_rate
 FROM `svc_base` s
 LEFT JOIN `crosswalk` c ON c.em_employee_id = s.Employee_ID
 LEFT JOIN `comm_bridge` cb ON cb.community_id = s.community_id
 LEFT JOIN `comm_dim` cd ON cd.community_id = s.community_id
 LEFT JOIN `em_employees` emp ON emp.ID = s.Employee_ID
+LEFT JOIN `provider_dim` p
+  ON p.community_id = s.community_id
+  AND p.provider_code = s.provider_code
 WHERE s.Employee_ID IS NOT NULL
   AND s.Employee_ID != ''
   AND (c.adp_associate_id IS NULL OR c.adp_associate_id = '')
@@ -567,7 +594,10 @@ SELECT
   COALESCE(MAX(se.svc_minutes_employee), 0) AS svc_minutes_employee,
   COALESCE(MAX(se.svc_count_employee), 0) AS svc_count_employee,
   COALESCE(MAX(me.med_minutes_employee), 0) AS med_minutes_employee,
-  COALESCE(MAX(me.med_pass_count_employee), 0) AS med_pass_count_employee
+  COALESCE(MAX(me.med_pass_count_employee), 0) AS med_pass_count_employee,
+  MAX(se.provider_name) AS provider_name,
+  MAX(se.provider_category) AS provider_category,
+  MAX(se.provider_billing_rate) AS provider_billing_rate
 FROM staff_with_id h
 LEFT JOIN `crosswalk` c ON c.adp_associate_id = h.associate_id
 LEFT JOIN `dept_worked_mapping` m ON m.`Timecard Worked Department Description` = h.worked_dept_description
@@ -627,7 +657,10 @@ SELECT
   COALESCE(SUM(se.svc_minutes_employee), 0) AS svc_minutes_employee,
   CAST(COALESCE(SUM(se.svc_count_employee), 0) AS DOUBLE) AS svc_count_employee,
   COALESCE(SUM(me.med_minutes_employee), 0) AS med_minutes_employee,
-  CAST(COALESCE(SUM(me.med_pass_count_employee), 0) AS DOUBLE) AS med_pass_count_employee
+  CAST(COALESCE(SUM(me.med_pass_count_employee), 0) AS DOUBLE) AS med_pass_count_employee,
+  MAX(se.provider_name) AS provider_name,
+  MAX(se.provider_category) AS provider_category,
+  MAX(se.provider_billing_rate) AS provider_billing_rate
 FROM care_keys ck
 LEFT JOIN staff_keys sk
   ON sk.community_id = ck.community_id
@@ -710,6 +743,9 @@ SELECT
   CAST(NULL AS DOUBLE) AS svc_count_employee,
   CAST(NULL AS DOUBLE) AS med_minutes_employee,
   CAST(NULL AS DOUBLE) AS med_pass_count_employee,
+  CAST(NULL AS STRING) AS provider_name,
+  CAST(NULL AS STRING) AS provider_category,
+  CAST(NULL AS DOUBLE) AS provider_billing_rate,
   CAST(sp.census_occupied AS DOUBLE) AS census_occupied,
   CAST(sp.capacity AS DOUBLE) AS capacity,
   COALESCE(ra.ra_hours_worked, 0) AS ra_hours_worked,
@@ -804,6 +840,9 @@ SELECT
   sd.svc_count_employee,
   sd.med_minutes_employee,
   sd.med_pass_count_employee,
+  sd.provider_name,
+  sd.provider_category,
+  sd.provider_billing_rate,
   CAST(NULL AS DOUBLE) AS census_occupied,
   CAST(NULL AS DOUBLE) AS capacity,
   CAST(NULL AS DOUBLE) AS ra_hours_worked,
@@ -873,6 +912,9 @@ SELECT
   CAST(u.svc_count_employee AS DOUBLE) AS svc_count_employee,
   CAST(0.0 AS DOUBLE) AS med_minutes_employee,
   CAST(0.0 AS DOUBLE) AS med_pass_count_employee,
+  u.provider_name,
+  u.provider_category,
+  u.provider_billing_rate,
   CAST(NULL AS DOUBLE) AS census_occupied,
   CAST(NULL AS DOUBLE) AS capacity,
   CAST(NULL AS DOUBLE) AS ra_hours_worked,
@@ -942,6 +984,9 @@ SELECT
   CAST(0.0 AS DOUBLE) AS svc_count_employee,
   CAST(mu.med_minutes_employee AS DOUBLE) AS med_minutes_employee,
   CAST(mu.med_pass_count_employee AS DOUBLE) AS med_pass_count_employee,
+  CAST(NULL AS STRING) AS provider_name,
+  CAST(NULL AS STRING) AS provider_category,
+  CAST(NULL AS DOUBLE) AS provider_billing_rate,
   CAST(NULL AS DOUBLE) AS census_occupied,
   CAST(NULL AS DOUBLE) AS capacity,
   CAST(NULL AS DOUBLE) AS ra_hours_worked,
@@ -1029,6 +1074,25 @@ def build_actions() -> list[dict]:
             "recentVersionCutoffMs": 0,
             "tables": [{}],
         },
+        {
+            "type": "LoadFromVault",
+            "id": "load-providers",
+            "name": "service_providers",
+            "settings": {"preferredDatabaseEntityType": "TEMP_VIEW"},
+            "gui": {"x": 1104, "y": 280, "color": None, "colorSource": None, "sampleJson": None},
+            "previewRowLimit": 10000,
+            "propagateAi": False,
+            "filterPolicy": "LEGACY",
+            "dataSourceId": "c028ecfe-b470-43cb-bd9a-bf0f8de0abbe",
+            "sourceType": "AUTO",
+            "executeFlowWhenUpdated": False,
+            "pseudoDataSource": False,
+            "truncateTextColumns": False,
+            "truncateRows": False,
+            "onlyLoadNewVersions": False,
+            "recentVersionCutoffMs": 0,
+            "tables": [{}],
+        },
         # Existing RA-only chain
         _sql_tile("sql-01-ra-punches", "ra_punches", ["load-punches"], 816, 48, SQL_01_RA_PUNCHES),
         _sql_tile("sql-02-ra-hourly", "ra_hourly", ["sql-01-ra-punches"], 912, 48, SQL_02_RA_HOURLY),
@@ -1040,9 +1104,10 @@ def build_actions() -> list[dict]:
         _sql_tile("sql-06-staff-detail", "staff_detail", ["sql-05-staff-hourly", "load-crosswalk", "load-dept-mapping", "sql-12-svc-by-employee", "sql-22-med-by-employee", "sql-07-comm-bridge", "sql-32-comm", "load-em-employees"], 1008, 200, SQL_06_STAFF_DETAIL),
         # Existing service / med / revenue / census / community / sched-plan tiles
         _sql_tile("sql-10-svc-base", "svc_base", ["load-svc-recv"], 1104, 48, SQL_10_SVC_BASE),
+        _sql_tile("sql-08-providers", "provider_dim", ["load-providers"], 1104, 280, SQL_08_PROVIDERS),
         _sql_tile("sql-11-svc-agg", "svc_agg", ["sql-10-svc-base"], 1200, 48, SQL_11_SVC_AGG),
-        _sql_tile("sql-12-svc-by-employee", "svc_by_employee", ["sql-10-svc-base", "load-crosswalk", "load-em-employees"], 1200, 200, SQL_12_SVC_BY_EMPLOYEE),
-        _sql_tile("sql-13-svc-unmatched", "svc_unmatched", ["sql-10-svc-base", "load-crosswalk", "sql-32-comm", "load-em-employees", "sql-07-comm-bridge"], 1296, 200, SQL_13_SVC_UNMATCHED),
+        _sql_tile("sql-12-svc-by-employee", "svc_by_employee", ["sql-10-svc-base", "load-crosswalk", "load-em-employees", "sql-08-providers"], 1200, 200, SQL_12_SVC_BY_EMPLOYEE),
+        _sql_tile("sql-13-svc-unmatched", "svc_unmatched", ["sql-10-svc-base", "load-crosswalk", "sql-32-comm", "load-em-employees", "sql-07-comm-bridge", "sql-08-providers"], 1296, 200, SQL_13_SVC_UNMATCHED),
         _sql_tile("sql-20-med-base", "med_base", ["load-med-del"], 1296, 48, SQL_20_MED_BASE),
         _sql_tile("sql-21-med-agg", "med_agg", ["sql-20-med-base"], 1392, 48, SQL_21_MED_AGG),
         _sql_tile("sql-22-med-by-employee", "med_by_employee", ["sql-20-med-base", "load-crosswalk", "load-em-employees"], 1392, 200, SQL_22_MED_BY_EMPLOYEE),
