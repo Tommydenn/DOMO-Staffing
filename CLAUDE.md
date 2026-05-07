@@ -118,7 +118,13 @@ Sum of `(svc_minutes_employee + med_minutes_employee)/60` across all four == raw
 - **Edit ETL via source-of-truth**: edit `matcher/df205_pivot.py`, regenerate JSON, push via `mcp__Domo_ETL__update_dataflow(dataflow_id=205, actions=...)`. Pass actions inline.
 - **Card update via direct API**: `update_card` tool returns 405; use `domo_api_request` with `PUT /api/content/v1/cards/{id}` and the FULL card body (no partial patches).
 - **Inline-paste corruption is real**: when pasting 50KB+ JSON, the model sometimes hallucinates extra clauses. Always verify push response by querying back the pushed body for known-corruption patterns: `LOWER(COALESCE(Hours_*, 'false'), 'false')` (wrong sql-40), `FROM \`svc_unmatched\` u` at the END of sql-99 (should be `med_unmatched mu`).
-- **NEW card-level beastmodes can NOT be created via API**: PUT to `/api/content/v1/cards/{id}` with a new formula in `formulas.formulas.{id}` silently strips the new entry — `templateId` is server-assigned during Analyzer UI creation. Existing formulas can be referenced or modified, but creation must be in the UI. Dataset-level formulas PUT to `/api/data/v3/datasources/{id}/formulas` returns 403 even for owner. **Workaround**: add useful aggregations as columns in the dataflow output (e.g. v5041 hour buckets, v5042 provider columns), then card-level math becomes plain SUM/aggregation on real columns.
+- **Beast Modes API is at `/api/query/v1/functions/...`** (NOT `/api/content/v1/cards/{id}` for formula creation, and NOT `/api/data/v3/datasources/{id}/formulas`). Auth: same `X-DOMO-Developer-Token` the MCP already uses. Documented at https://www.domo.com/docs/api-reference/beast-modes/.
+  - **Create**: `POST /api/query/v1/functions/template` with body `{"name":"...", "expression":"SUM(...)", "dataType":"DOUBLE"|"DECIMAL", "links":[{"resource":{"type":"DATA_SOURCE","id":"<ds-id>"}, "visible": true, "active": true}]}`. The link MUST have `visible: true` or you get "Non global functions must have one and only one visible link". Returns `id` (int) and `legacyId` ("calculation_<uuid>") — use `legacyId` as `formulaId` in card subscriptions.
+  - **Update expression**: `PUT /api/query/v1/functions/template/{id}/update?strict=false` body `{"expression":"..."}`. Path uses int `id`, not legacyId.
+  - **Get by id**: `GET /api/query/v1/functions/template/{id}`.
+  - **Search**: `POST /api/query/v1/functions/search` with `{"name":"<substring>", "filters":[{"field":"<flag>"}], "sort":{"field":"name","ascending":true}, "limit":N, "offset":0}`. Valid filter fields: `active, archived, beastmode, card, column, created, dataset, datatype, function, global, inactive, legacyid, link, locked, modified, name, nested, owner, status, variable` (plus `not<...>` variants). Filters are flag predicates, not key-value queries.
+  - **Lock**: `PUT /api/query/v1/functions/{id}/lock`.
+  - The previously-suspected limitation ("can't create new formulas via card PUT") was real for `/api/content/v1/cards/{id}` — but the right path is `/api/query/v1/functions/template`.
 
 ## Where we left off
 
@@ -140,7 +146,7 @@ Sum of `(svc_minutes_employee + med_minutes_employee)/60` across all four == raw
   - **v5041 — pay code / rate type bucket columns** (commit `a16acf1`). 11 additive columns (4 categoricals + 7 hour buckets). Bucket sums = staff_hours_worked within ~0.05%. Caretta Holmen unpaid_hours = 157 hrs / $0 paid.
   - **v5042 — EM Service Providers join** (commit `941be9b`). Joined `c028ecfe-b470-43cb-bd9a-bf0f8de0abbe` on (Community_ID, Provider Code). Adds `provider_name` / `provider_category` / `provider_billing_rate`. 14 distinct providers at Caretta Holmen, Nurse @ $120/hr, RA roles @ $50/hr.
   - **New card #1046798988 "Nursing Productivity by Community"** — pivot by community → dept_worked with percentOfTotal. On page 826293561.
-  - **API limitation discovered**: card-level beastmode CREATION via PUT silently fails (templateId is server-assigned). Documented in Conventions.
+  - **API limitation _resolved_**: beastmodes ARE creatable via `POST /api/query/v1/functions/template` (was hunting wrong path). Created 4 dataset-level beastmodes on `DEV | RA Staffing Efficiency`: `Nursing Hours Worked` (id 9546), `% Nursing Worked` (9547), `Nursing Hours Received` (9548), `% Nursing Received` (9549). Card #1046798988 now uses them directly — explicit % columns, sorted by % Nursing Received DESC. Glenn Minnetonka tops the list at 16.3% / 10.7%. See Conventions for full API.
 
 ## Pickup checklist for new chat
 
