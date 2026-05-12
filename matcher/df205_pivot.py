@@ -272,6 +272,61 @@ WHERE Res_Number IS NOT NULL
 GROUP BY 1, 2"""
 
 
+# For each (community, adp_associate, month), the employee's DOMINANT
+# provider — the provider_code with the most service minutes that month.
+# Used as a fallback in sql-06 Branch A for hours where no service event
+# happened (so the employee's idle/non-service hours are still attributed
+# to whatever role they primarily worked, instead of falling into a
+# nameless (blank) bucket). Hour-grain provider from se still wins when
+# present.
+SQL_51_EMP_DOMINANT_PROVIDER_MONTHLY = """WITH provider_minutes AS (
+  SELECT
+    s.community_id,
+    c.adp_associate_id,
+    CAST(DATE_TRUNC('MONTH', s.report_date) AS DATE) AS month_start,
+    s.provider_code,
+    SUM(s.svc_minutes) AS provider_minutes
+  FROM `svc_base` s
+  INNER JOIN `crosswalk` c ON c.em_employee_id = s.Employee_ID
+  WHERE s.Employee_ID IS NOT NULL
+    AND s.Employee_ID != ''
+    AND c.adp_associate_id IS NOT NULL
+    AND c.adp_associate_id != ''
+  GROUP BY 1, 2, 3, 4
+),
+max_per_emp_month AS (
+  SELECT
+    community_id, adp_associate_id, month_start,
+    MAX(provider_minutes) AS max_min
+  FROM provider_minutes
+  GROUP BY 1, 2, 3
+),
+dominant AS (
+  SELECT
+    pm.community_id, pm.adp_associate_id, pm.month_start,
+    MIN(pm.provider_code) AS dominant_provider_code
+  FROM provider_minutes pm
+  INNER JOIN max_per_emp_month m
+    ON m.community_id = pm.community_id
+    AND m.adp_associate_id = pm.adp_associate_id
+    AND m.month_start = pm.month_start
+    AND m.max_min = pm.provider_minutes
+  GROUP BY 1, 2, 3
+)
+SELECT
+  d.community_id,
+  d.adp_associate_id,
+  d.month_start,
+  MAX(p.provider_name) AS dominant_provider_name,
+  MAX(p.provider_category) AS dominant_provider_category,
+  MAX(p.provider_billing_rate) AS dominant_provider_billing_rate
+FROM dominant d
+LEFT JOIN `provider_dim` p
+  ON p.community_id = d.community_id
+  AND p.provider_code = d.dominant_provider_code
+GROUP BY 1, 2, 3"""
+
+
 # --- New tiles for the all-staff pivot -----------------------------------
 
 # All staff (no RA filter) — carries department/title/employee_name
@@ -563,9 +618,16 @@ SQL_06_STAFF_DETAIL = """WITH staff_with_id AS (
     h.other_hours_total,
     h.overlap_minutes,
     h.total_pay,
-    h.punch_minutes
+    h.punch_minutes,
+    epd.dominant_provider_name,
+    epd.dominant_provider_category,
+    epd.dominant_provider_billing_rate
   FROM `staff_hourly` h
   LEFT JOIN `comm_bridge` cb ON cb.community_name = h.community_name
+  LEFT JOIN `emp_dominant_provider_monthly` epd
+    ON epd.community_id = cb.community_id
+    AND epd.adp_associate_id = h.associate_id
+    AND epd.month_start = CAST(DATE_TRUNC('MONTH', h.bucket_date) AS DATE)
 ),
 staff_keys AS (
   SELECT DISTINCT community_id, associate_id, report_date, hour_of_day
@@ -608,9 +670,9 @@ SELECT
   COALESCE(MAX(se.svc_count_employee), 0) AS svc_count_employee,
   COALESCE(MAX(me.med_minutes_employee), 0) AS med_minutes_employee,
   COALESCE(MAX(me.med_pass_count_employee), 0) AS med_pass_count_employee,
-  MAX(se.provider_name) AS provider_name,
-  MAX(se.provider_category) AS provider_category,
-  MAX(se.provider_billing_rate) AS provider_billing_rate
+  COALESCE(MAX(se.provider_name), MAX(h.dominant_provider_name)) AS provider_name,
+  COALESCE(MAX(se.provider_category), MAX(h.dominant_provider_category)) AS provider_category,
+  COALESCE(MAX(se.provider_billing_rate), MAX(h.dominant_provider_billing_rate)) AS provider_billing_rate
 FROM staff_with_id h
 LEFT JOIN `crosswalk` c ON c.adp_associate_id = h.associate_id
 LEFT JOIN `dept_worked_mapping` m ON m.`Timecard Worked Department Description` = h.worked_dept_description
@@ -1130,7 +1192,7 @@ def build_actions() -> list[dict]:
         _sql_tile("sql-04-staff-punches", "staff_punches", ["load-punches"], 816, 200, SQL_04_STAFF_PUNCHES),
         _sql_tile("sql-05-staff-hourly", "staff_hourly", ["sql-04-staff-punches"], 912, 200, SQL_05_STAFF_HOURLY),
         _sql_tile("sql-07-comm-bridge", "comm_bridge", ["load-occ"], 912, 280, SQL_07_COMM_BRIDGE),
-        _sql_tile("sql-06-staff-detail", "staff_detail", ["sql-05-staff-hourly", "load-crosswalk", "load-dept-mapping", "sql-12-svc-by-employee", "sql-22-med-by-employee", "sql-07-comm-bridge", "sql-32-comm", "load-em-employees"], 1008, 200, SQL_06_STAFF_DETAIL),
+        _sql_tile("sql-06-staff-detail", "staff_detail", ["sql-05-staff-hourly", "load-crosswalk", "load-dept-mapping", "sql-12-svc-by-employee", "sql-22-med-by-employee", "sql-07-comm-bridge", "sql-32-comm", "load-em-employees", "sql-51-emp-dominant-provider"], 1008, 200, SQL_06_STAFF_DETAIL),
         # Existing service / med / revenue / census / community / sched-plan tiles
         _sql_tile("sql-10-svc-base", "svc_base", ["load-svc-recv"], 1104, 48, SQL_10_SVC_BASE),
         _sql_tile("sql-08-providers", "provider_dim", ["load-providers"], 1104, 280, SQL_08_PROVIDERS),
@@ -1146,6 +1208,7 @@ def build_actions() -> list[dict]:
         _sql_tile("sql-32-comm", "comm_dim", ["load-comm"], 1680, 48, SQL_32_COMM),
         _sql_tile("sql-40-sched-plan", "sched_plan", ["load-sched-plan"], 1776, 48, SQL_40_SCHED_PLAN),
         _sql_tile("sql-50-residents-monthly", "svc_residents_monthly", ["sql-10-svc-base"], 1296, 280, SQL_50_RESIDENTS_MONTHLY),
+        _sql_tile("sql-51-emp-dominant-provider", "emp_dominant_provider_monthly", ["sql-10-svc-base", "load-crosswalk", "sql-08-providers"], 1392, 280, SQL_51_EMP_DOMINANT_PROVIDER_MONTHLY),
         # Final UNION
         _sql_tile(
             "sql-99-final",
