@@ -259,6 +259,19 @@ WHERE (End_Date IS NULL OR End_Date >= CURRENT_DATE)
 GROUP BY 1"""
 
 
+# Per (community, month) count of distinct residents who received services
+# in that month. Joined into sql-99 Detail rows so card-level beastmodes can
+# show residents-served at community grain.
+SQL_50_RESIDENTS_MONTHLY = """SELECT
+  community_id,
+  CAST(DATE_TRUNC('MONTH', report_date) AS DATE) AS month_start,
+  COUNT(DISTINCT Res_Number) AS residents_served_monthly,
+  COUNT(*) AS svc_events_monthly
+FROM `svc_base`
+WHERE Res_Number IS NOT NULL
+GROUP BY 1, 2"""
+
+
 # --- New tiles for the all-staff pivot -----------------------------------
 
 # All staff (no RA filter) — carries department/title/employee_name
@@ -577,7 +590,7 @@ SELECT
   COALESCE(MAX(c.unified_employee_id), CONCAT('ADP:', h.associate_id)) AS unified_employee_id,
   COALESCE(MAX(c.em_employee_id), '') AS em_employee_id,
   COALESCE(MAX(m.`Department Worked`), 'unmapped') AS dept_worked,
-  COALESCE(MAX(cb_twdd.community_name), MAX(m.`Community Worked In`), MAX(h.community_name), 'unmapped') AS community_worked_in,
+  COALESCE(MAX(cb_twdd.community_name), MAX(h.community_name), MAX(m.`Community Worked In`), 'unmapped') AS community_worked_in,
   SUM(h.overlap_minutes) / 60.0 AS staff_hours_worked,
   SUM(h.total_pay * (h.overlap_minutes / NULLIF(h.punch_minutes, 0))) AS staff_labor_cost,
   MAX(h.pay_code) AS pay_code,
@@ -759,6 +772,7 @@ SELECT
   CAST(COALESCE(sv.uncovered_service_count, 0) AS DOUBLE) AS uncovered_service_count,
   COALESCE(sv.service_billed_hour, 0) AS service_billed_hour,
   CAST(COALESCE(sv.service_residents, 0) AS DOUBLE) AS service_residents,
+  CAST(COALESCE(srm.residents_served_monthly, 0) AS DOUBLE) AS residents_served_monthly,
   CAST(COALESCE(md.med_passes, 0) AS DOUBLE) AS med_passes,
   CAST(COALESCE(md.med_residents, 0) AS DOUBLE) AS med_residents,
   COALESCE(md.med_minutes_est, 0) AS med_minutes_est,
@@ -792,6 +806,9 @@ LEFT JOIN `revenue_monthly` rv
   AND rv.month_start = CAST(DATE_TRUNC('MONTH', sp.report_date) AS DATE)
 LEFT JOIN `sched_plan` pl
   ON pl.community_id = sp.community_id
+LEFT JOIN `svc_residents_monthly` srm
+  ON srm.community_id = sp.community_id
+  AND srm.month_start = CAST(DATE_TRUNC('MONTH', sp.report_date) AS DATE)
 
 UNION ALL
 
@@ -856,6 +873,7 @@ SELECT
   CAST(NULL AS DOUBLE) AS uncovered_service_count,
   CAST(NULL AS DOUBLE) AS service_billed_hour,
   CAST(NULL AS DOUBLE) AS service_residents,
+  CAST(COALESCE(srm.residents_served_monthly, 0) AS DOUBLE) AS residents_served_monthly,
   CAST(NULL AS DOUBLE) AS med_passes,
   CAST(NULL AS DOUBLE) AS med_residents,
   CAST(NULL AS DOUBLE) AS med_minutes_est,
@@ -867,6 +885,9 @@ SELECT
   CAST(NULL AS DOUBLE) AS service_hours_per_ra_hour,
   CAST(NULL AS DOUBLE) AS ra_hours_per_census
 FROM `staff_detail` sd
+LEFT JOIN `svc_residents_monthly` srm
+  ON srm.community_id = sd.community_id
+  AND srm.month_start = CAST(DATE_TRUNC('MONTH', sd.report_date) AS DATE)
 
 UNION ALL
 
@@ -928,6 +949,7 @@ SELECT
   CAST(NULL AS DOUBLE) AS uncovered_service_count,
   CAST(NULL AS DOUBLE) AS service_billed_hour,
   CAST(NULL AS DOUBLE) AS service_residents,
+  CAST(COALESCE(srm.residents_served_monthly, 0) AS DOUBLE) AS residents_served_monthly,
   CAST(NULL AS DOUBLE) AS med_passes,
   CAST(NULL AS DOUBLE) AS med_residents,
   CAST(NULL AS DOUBLE) AS med_minutes_est,
@@ -939,6 +961,9 @@ SELECT
   CAST(NULL AS DOUBLE) AS service_hours_per_ra_hour,
   CAST(NULL AS DOUBLE) AS ra_hours_per_census
 FROM `svc_unmatched` u
+LEFT JOIN `svc_residents_monthly` srm
+  ON srm.community_id = u.community_id
+  AND srm.month_start = CAST(DATE_TRUNC('MONTH', u.report_date) AS DATE)
 
 UNION ALL
 
@@ -1000,6 +1025,7 @@ SELECT
   CAST(NULL AS DOUBLE) AS uncovered_service_count,
   CAST(NULL AS DOUBLE) AS service_billed_hour,
   CAST(NULL AS DOUBLE) AS service_residents,
+  CAST(COALESCE(srm.residents_served_monthly, 0) AS DOUBLE) AS residents_served_monthly,
   CAST(NULL AS DOUBLE) AS med_passes,
   CAST(NULL AS DOUBLE) AS med_residents,
   CAST(NULL AS DOUBLE) AS med_minutes_est,
@@ -1010,7 +1036,10 @@ SELECT
   CAST(NULL AS DOUBLE) AS residents_on_plan,
   CAST(NULL AS DOUBLE) AS service_hours_per_ra_hour,
   CAST(NULL AS DOUBLE) AS ra_hours_per_census
-FROM `med_unmatched` mu"""
+FROM `med_unmatched` mu
+LEFT JOIN `svc_residents_monthly` srm
+  ON srm.community_id = mu.community_id
+  AND srm.month_start = CAST(DATE_TRUNC('MONTH', mu.report_date) AS DATE)"""
 
 
 def build_actions() -> list[dict]:
@@ -1116,6 +1145,7 @@ def build_actions() -> list[dict]:
         _sql_tile("sql-31-census", "census_daily", ["load-occ"], 1584, 48, SQL_31_CENSUS),
         _sql_tile("sql-32-comm", "comm_dim", ["load-comm"], 1680, 48, SQL_32_COMM),
         _sql_tile("sql-40-sched-plan", "sched_plan", ["load-sched-plan"], 1776, 48, SQL_40_SCHED_PLAN),
+        _sql_tile("sql-50-residents-monthly", "svc_residents_monthly", ["sql-10-svc-base"], 1296, 280, SQL_50_RESIDENTS_MONTHLY),
         # Final UNION
         _sql_tile(
             "sql-99-final",
@@ -1131,6 +1161,7 @@ def build_actions() -> list[dict]:
                 "sql-31-census",
                 "sql-32-comm",
                 "sql-40-sched-plan",
+                "sql-50-residents-monthly",
             ],
             1872, 48,
             SQL_99_FINAL_NEW,
