@@ -108,8 +108,41 @@ Sum of `(svc_minutes_employee + med_minutes_employee)/60` across all four == raw
 ## Cards to know
 
 - **#1735745257 "Last Month Efficiency by Community by Employee"** — primary all-staff card, reads DF205 Detail rows. Row dims: Community → Match Status → Employee. Columns: Hours Worked (ADP), Service Hours (EM = svc + med), Med Pass Hours, Efficiency.
-- **#1046798988 "Nursing Productivity by Community"** — created 2026-05-07. Pivot by community → dept_worked, with `percentOfTotal: true` to show nursing share visually. Last-month filter. On page 826293561 ("NEW - Staffing Dashboard"). Tommy needs to add explicit "% Nursing Worked" / "% Nursing Received" beastmodes via Analyzer UI (API can't create new card-level formulas — see API gotchas below).
+- **#1046798988 "Nursing Productivity by Community"** — created 2026-05-07. Pivot by community → dept_worked, with `percentOfTotal: true` to show nursing share visually. Last-month filter. On page 826293561 ("NEW - Staffing Dashboard"). Uses `% Nursing Worked` (9547) + `% Nursing Received` (9549) directly.
+- **#571988101 "Productivity by Community by Provider"** — pivot Community → provider_name. Last-30d. Created 2026-05-12; **legacy beast modes** broke initial render (referenced old `ra_hours_worked` / `service_minutes`) — fixed 2026-05-12 by replacing value columns with raw `staff_hours_worked` SUM + `Service Hours (EM)` (9557) + `Efficiency` (9556). Will render realistic per-provider efficiencies after v5045 (dominant-provider fallback).
+- **#429214416 "Nursing Productivity by Community Simple"** — Tommy added 2026-05-13/14. New per-resident ratio beastmodes (9559–9562) attached. Uses `Monday of the Week` (9558) for week grain.
+- **#321295623 "Efficiency by Employee"** — owner 1823318908 (teammate), created 2026-05-14. Tommy added.
 - **#463035702 "Staffing Efficiency Comparison"** — legacy community-level RA-only card, reads Hour rows. Used as the verification benchmark.
+
+## Dataset-level beast modes catalog (`995db646-…` = DEV | RA Staffing Efficiency)
+
+**Use these — they reference the current schema:**
+
+| ID | legacyId (formulaId) | Name | Expression / notes |
+|---|---|---|---|
+| 9554 | `calculation_a0905dd7…` | Community Name | `community_worked_in` (use as ROW dim) |
+| 9555 | `calculation_d67ea1d8…` | Med Pass Hours | `SUM(med_minutes_employee)/60.0` |
+| 9557 | `calculation_b7021ade…` | Service Hours (EM) | `(SUM(svc_minutes_employee)+SUM(med_minutes_employee))/60` |
+| 9556 | `calculation_f29f1b5c…` | Efficiency | `Service Hours (EM) / SUM(staff_hours_worked)` |
+| 9546 | `calculation_e6e76616…` | Nursing Hours Worked | nursing-dept hrs |
+| 9547 | `calculation_737bf53d…` | % Nursing Worked | nursing/total worked |
+| 9548 | `calculation_5dab3372…` | Nursing Hours Received | nursing svc+med hrs |
+| 9549 | `calculation_2e22999b…` | % Nursing Received | nursing/total received |
+| 9550 | `calculation_70d47244…` | Residents Receiving Services | `MAX(residents_served_monthly)` |
+| 9558 | `calculation_66bbd181…` | Monday of the Week | week-grain key from `report_date` |
+| 9559 | `calculation_0485acdc…` | Nursing Utilization | `9548/9546` (recv/worked) |
+| 9560 | `calculation_9e58f5a8…` | Nursing Rec / Total Rec | `9548/9563` |
+| 9561 | `calculation_a2913b0d…` | Nursing Hrs Worked / Residents | `9546/9550` |
+| 9562 | `calculation_5794b188…` | Nursing Hrs Rec / Residents | `9548/9550` |
+| 9563 | `calculation_b6243c44…` | Service Hours EM | clone of 9557, used by 9560 |
+
+**Do not use these (broken — reference columns that no longer exist after all-staff pivot):**
+- 9424 "Hours Worked (ADP)" → `SUM(ra_hours_worked)` ❌
+- 9425 "Hours Serviced (EM)" → uses `service_minutes` + `med_minutes_est` ❌
+- 9426 "Unscheduled Hours" / 9427 "% Unscheduled" / 9428 "Unscheduled Charge" → all use `uncovered_service_minutes` / `ra_labor_cost` ❌
+- 9429 "Efficiency" → uses old columns ❌ AND name-collides with 9556 → causes the orange "Rename Beast Modes" warning in Analyzer
+
+**For new ADP-hours columns** just drag raw `staff_hours_worked` as SUM (no beast mode needed).
 
 ## Conventions
 - Tailwind for styling (CDN mode — utility classes only)
@@ -147,13 +180,23 @@ Sum of `(svc_minutes_employee + med_minutes_employee)/60` across all four == raw
   - **v5042 — EM Service Providers join** (commit `941be9b`). Joined `c028ecfe-b470-43cb-bd9a-bf0f8de0abbe` on (Community_ID, Provider Code). Adds `provider_name` / `provider_category` / `provider_billing_rate`. 14 distinct providers at Caretta Holmen, Nurse @ $120/hr, RA roles @ $50/hr.
   - **New card #1046798988 "Nursing Productivity by Community"** — pivot by community → dept_worked with percentOfTotal. On page 826293561.
   - **API limitation _resolved_**: beastmodes ARE creatable via `POST /api/query/v1/functions/template` (was hunting wrong path). Created 4 dataset-level beastmodes on `DEV | RA Staffing Efficiency`: `Nursing Hours Worked` (id 9546), `% Nursing Worked` (9547), `Nursing Hours Received` (9548), `% Nursing Received` (9549). Card #1046798988 now uses them directly — explicit % columns, sorted by % Nursing Received DESC. Glenn Minnetonka tops the list at 16.3% / 10.7%. See Conventions for full API.
+- **2026-05-12 — Provider efficiency card + v5045 dominant-provider fallback** (commit `c56407c` on PR #12):
+  - User reported card #571988101 "Productivity by Community by Provider" rendering broken: ADP hours showing as `(blank)` for most rows, efficiency > 100%.
+  - **Root cause #1 (data)**: when grouping by provider, only ADP hours that had a concurrent EM service event got `provider_name` from sql-12. An employee's idle/non-service hours fell into the `(blank)` bucket — so denominator under-counted in per-provider math.
+  - **Fix**: new tile `sql-51 emp_dominant_provider_monthly` picks the provider with the most service minutes per (community, employee, month). sql-06 Branch A LEFT JOINs it and uses `COALESCE(MAX(se.provider_name), MAX(h.dominant_provider_name))` so hour-grain wins when present, monthly dominant fills the rest. Grain unchanged (7,361,632 rows). Pushed v5045, byte-for-byte verify clean, triggered run id 7469839, SUCCESS in ~6.5min.
+  - **Root cause #2 (card)**: card had 3 legacy beast modes (`Hours Worked (ADP)` 9424 = `SUM(ra_hours_worked)`, `Hours Serviced (EM)` 9425, `Efficiency` 9429) still attached from before the all-staff pivot. Those columns don't exist anymore → beast modes return null.
+  - **Fix**: PUT card with new subscription columns: raw `staff_hours_worked` SUM (alias "Hours Worked (ADP)") + `Service Hours (EM)` 9557 (alias "Hours Received (EM)") + `Efficiency` 9556. Card now renders realistic numbers (Glenn Minnetonka RA AM AL/IL FLOAT: 481 ADP / 262 EM / 55% efficiency).
+  - **Outstanding**: duplicate "Efficiency" + "Service Hours (EM)" beast mode names on the dataset still trigger the orange "Rename Beast Modes to avoid conflict" warning in Analyzer. Could fix by archiving 9424/9425/9426/9427/9428/9429 (all reference dead columns). Tommy hasn't asked yet.
+- **2026-05-13 / 14 — Tommy added per-resident ratio beast modes and two new cards**:
+  - Beast modes created on the dataset (visible in catalog table above): **9558 Monday of the Week** (week-grain key), **9559 Nursing Utilization** (recv/worked), **9560 Nursing Rec / Total Rec**, **9561 Nursing Hrs Worked / Residents**, **9562 Nursing Hrs Rec / Residents**, **9563 Service Hours EM** (clone of 9557). The 95xx-`DOMO_BEAST_MODE(NNNN)` syntax composes beast modes by id — handy.
+  - New cards: **#429214416 "Nursing Productivity by Community Simple"** and **#321295623 "Efficiency by Employee"** (owned by teammate 1823318908). Both use the dataset-level beast modes directly (no card-level formulas needed).
 
 ## Pickup checklist for new chat
 
 1. Read this file + memory index (auto-loaded).
-2. **Check PR #12 status** at https://github.com/Tommydenn/DOMO-Staffing/pull/12. If merged, branch `claude/intelligent-kilby-1467f4` can be deleted. If not merged yet, that's still the working branch.
-3. **Tommy still owes UI work** on card #1046798988: add explicit "% Nursing Worked" and "% Nursing Received" beastmodes via Analyzer UI (formulas in PR description). Check whether he did it; if not, gentle nudge.
-4. **Output dataset has new columns** worth using in cards: pay/rate buckets (v5041), provider_name/category/billing_rate (v5042). Tommy can build revenue-validation cards: `SUM(svc_minutes_employee/60.0 * provider_billing_rate)` should reconcile against `svc_revenue_month`.
+2. **Check PR #12 status** at https://github.com/Tommydenn/DOMO-Staffing/pull/12. Latest commit `c56407c` (v5045 dominant-provider fallback). If merged, branch `claude/intelligent-kilby-1467f4` can be deleted.
+3. **Output dataset columns to remember**: pay/rate buckets (v5041), provider_name/category/billing_rate (v5042), `residents_served_monthly` (v5044), dominant-provider fallback via sql-51 (v5045). Revenue-validation card idea: `SUM(svc_minutes_employee/60.0 * provider_billing_rate)` should reconcile against `svc_revenue_month`.
+4. **Beast modes catalog above is canonical** — use it as the lookup table for which formulaId/templateId to reference.
 
 ## Open questions / TODOs
 - Clarify `.jsx` → `index.html` workflow
@@ -161,3 +204,4 @@ Sum of `(svc_minutes_employee + med_minutes_employee)/60` across all four == raw
 - Tommy: clean up TWDD webform inconsistencies long-term (the regex normalization is a safety net, not a substitute)
 - PR #12 needs review/merge.
 - **Med pass provider attribution**: `med_delivery` source has no Provider column, so med_unmatched and med_by_employee paths can't get provider_*. Acceptable since med passes are a smaller slice; revisit only if needed.
+- **Archive legacy beast modes** (9424, 9425, 9426, 9427, 9428, 9429) to silence the "Rename Beast Modes" Analyzer warning. Only do this when Tommy asks — they may be linked to cards we haven't audited.
