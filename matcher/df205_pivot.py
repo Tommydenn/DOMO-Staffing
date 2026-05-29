@@ -327,6 +327,139 @@ LEFT JOIN `provider_dim` p
 GROUP BY 1, 2, 3"""
 
 
+# Director-of-Nursing roster from ADP Employee Pay History + Job History.
+# Salaried DONs don't punch — we impute 40 hr/wk (8 hr/day M-F) so their hours
+# show up in DF205 alongside hourly staff. Only DON title for now (Tommy's
+# scope decision). Adds an ADP location → canonical community_name alias map
+# because the ADP "Location Description" field has typos and old names
+# ("Hayden Grove BL", "Caretta Senior Living Holmen") that don't match
+# comm_bridge directly.
+SQL_70_DON_DIM = """WITH salary_periods AS (
+  SELECT
+    `Associate ID` AS associate_id,
+    `Payroll Name` AS payroll_name,
+    `Regular Pay Effective Date` AS pay_start,
+    NULLIF(`Regular Pay Effective End Date`, '') AS pay_end,
+    `Annual Salary` AS annual_salary_raw,
+    `Job Class Code` AS class_code
+  FROM `emp_pay_history`
+  WHERE `Basis of Pay` = 'Salary'
+),
+job_positions AS (
+  SELECT
+    `Associate ID` AS associate_id,
+    `Job Title Description` AS job_title,
+    `Location Description` AS adp_location,
+    `Position Effective Date` AS pos_start,
+    NULLIF(`Position Effective End Date`, '') AS pos_end
+  FROM `emp_job_history`
+  WHERE `Position Status` = 'Active'
+    AND `Job Title Description` = 'Director of Nursing'
+)
+SELECT
+  s.associate_id,
+  MAX(s.payroll_name) AS payroll_name,
+  MAX(p.job_title) AS job_title,
+  MAX(p.adp_location) AS adp_location,
+  -- Normalize ADP location → canonical comm_bridge community_name
+  MAX(CASE
+    WHEN p.adp_location = 'Hayden Grove BL' THEN 'Hayden Grove Bloomington'
+    WHEN p.adp_location = 'Caretta Senior Living Holmen' THEN 'Caretta Holmen'
+    WHEN p.adp_location = 'Seven Hills Sr Living' THEN 'Seven Hills'
+    WHEN p.adp_location = 'Talamore Sun Prairie WI' THEN 'Talamore Sun Prairie'
+    WHEN p.adp_location = 'Talamore St Cloud-new' THEN 'Talamore St Cloud'
+    WHEN p.adp_location = 'Glenn Buffalo Memory Care' THEN 'The Glenn Buffalo MC'
+    WHEN p.adp_location = 'Minnetonka Orchard' THEN 'Orchards of Minnetonka'
+    WHEN p.adp_location = 'The Glenn West St. Paul' THEN 'The Glenn W St Paul'
+    WHEN p.adp_location = 'Talamore Woodbury-new' THEN 'Talamore Woodbury'
+    WHEN p.adp_location = 'Global Pointe Senior Living' THEN 'Global Pointe'
+    WHEN p.adp_location = 'Hayden Grove St. Anthony' THEN 'Hayden Grove St Anthony'
+    WHEN p.adp_location = 'Caretta Senior Living Bellevue' THEN 'Caretta Bellevue'
+    WHEN p.adp_location = 'Cottagewood - Rochester' THEN 'Cottagewood Rochester'
+    WHEN p.adp_location = 'Cottagewood - Mankato' THEN 'Cottagewood Mankato'
+    ELSE p.adp_location
+  END) AS community_name,
+  MAX(GREATEST(s.pay_start, p.pos_start)) AS effective_start,
+  MAX(CASE
+    WHEN s.pay_end IS NULL AND p.pos_end IS NULL THEN NULL
+    WHEN s.pay_end IS NULL THEN p.pos_end
+    WHEN p.pos_end IS NULL THEN s.pay_end
+    ELSE LEAST(s.pay_end, p.pos_end)
+  END) AS effective_end,
+  CAST(REPLACE(REPLACE(REPLACE(MAX(s.annual_salary_raw), '$', ''), ',', ''), ' ', '') AS DOUBLE) AS annual_salary,
+  CAST(REPLACE(REPLACE(REPLACE(MAX(s.annual_salary_raw), '$', ''), ',', ''), ' ', '') AS DOUBLE) / 2080.0 AS hourly_equiv,
+  MAX(s.class_code) AS class_code
+FROM salary_periods s
+INNER JOIN job_positions p ON p.associate_id = s.associate_id
+  AND (p.pos_end IS NULL OR p.pos_end >= s.pay_start)
+  AND (s.pay_end IS NULL OR s.pay_end >= p.pos_start)
+GROUP BY s.associate_id"""
+
+
+# Synthetic hourly punches for salaried DONs. Emits one row per
+# (associate_id, weekday, hour) for hours 8..15 (8a-4p), matching
+# the staff_hourly schema column-for-column so it can be UNIONed in
+# sql-06 cleanly. Anti-join real punches in staff_hourly: if the DON
+# has ANY punch row on a given date (e.g. PTO/sick), skip emitting
+# synthetic — that day's hours come from the real punch instead.
+SQL_71_DON_HOURLY = """WITH hours_dim AS (
+  SELECT 8 AS h UNION ALL SELECT 9 UNION ALL SELECT 10 UNION ALL SELECT 11
+  UNION ALL SELECT 12 UNION ALL SELECT 13 UNION ALL SELECT 14 UNION ALL SELECT 15
+),
+date_spine AS (
+  SELECT DISTINCT bucket_date FROM `staff_hourly`
+),
+don_days AS (
+  SELECT
+    d.associate_id,
+    d.payroll_name,
+    d.community_name,
+    d.hourly_equiv,
+    ds.bucket_date
+  FROM `don_dim` d
+  CROSS JOIN date_spine ds
+  WHERE DAYOFWEEK(ds.bucket_date) BETWEEN 2 AND 6  -- M-F
+    AND ds.bucket_date >= d.effective_start
+    AND (d.effective_end IS NULL OR ds.bucket_date <= d.effective_end)
+),
+real_punch_days AS (
+  SELECT DISTINCT associate_id, bucket_date FROM `staff_hourly`
+),
+days_to_emit AS (
+  SELECT dd.*
+  FROM don_days dd
+  LEFT JOIN real_punch_days rp
+    ON rp.associate_id = dd.associate_id
+    AND rp.bucket_date = dd.bucket_date
+  WHERE rp.bucket_date IS NULL
+)
+SELECT
+  d.associate_id,
+  CAST('Nursing' AS STRING) AS department_simplified,
+  CAST('Director of Nursing' AS STRING) AS job_title_description,
+  CAST(NULL AS STRING) AS worked_dept_description,
+  d.payroll_name AS employee_name,
+  d.community_name,
+  CAST('SALARIED' AS STRING) AS pay_code,
+  CAST(NULL AS STRING) AS timecard_pay_code,
+  CAST('Salary' AS STRING) AS rate_type_category,
+  d.hourly_equiv AS regular_pay_rate_amount,
+  CAST(8 AS DOUBLE) AS regular_hours_total,
+  CAST(0 AS DOUBLE) AS overtime_hours_total,
+  CAST(0 AS DOUBLE) AS pto_hours_total,
+  CAST(0 AS DOUBLE) AS unpaid_hours_total,
+  CAST(0 AS DOUBLE) AS training_hours_total,
+  CAST(0 AS DOUBLE) AS double_time_hours_total,
+  CAST(0 AS DOUBLE) AS other_hours_total,
+  d.bucket_date,
+  h.h AS hour_of_day,
+  CAST(60 AS DOUBLE) AS overlap_minutes,
+  d.hourly_equiv * 8 AS total_pay,
+  CAST(480 AS DOUBLE) AS punch_minutes
+FROM days_to_emit d
+CROSS JOIN hours_dim h"""
+
+
 # --- New tiles for the all-staff pivot -----------------------------------
 
 # All staff (no RA filter) — carries department/title/employee_name
@@ -594,7 +727,14 @@ GROUP BY 1, 2"""
 #      (community, associate, date, hour) — i.e., care work performed in hours
 #      where the matched ADP person wasn't punched at that community.
 # Both branches emit rows with svc_minutes_employee + med_minutes_employee.
-SQL_06_STAFF_DETAIL = """WITH staff_with_id AS (
+SQL_06_STAFF_DETAIL = """WITH staff_hourly_all AS (
+  -- Real ADP punches (sql-05)
+  SELECT * FROM `staff_hourly`
+  UNION ALL
+  -- Synthetic Director-of-Nursing salaried hours (sql-71)
+  SELECT * FROM `don_hourly`
+),
+staff_with_id AS (
   SELECT
     cb.community_id,
     h.community_name,
@@ -622,7 +762,7 @@ SQL_06_STAFF_DETAIL = """WITH staff_with_id AS (
     epd.dominant_provider_name,
     epd.dominant_provider_category,
     epd.dominant_provider_billing_rate
-  FROM `staff_hourly` h
+  FROM staff_hourly_all h
   LEFT JOIN `comm_bridge` cb ON cb.community_name = h.community_name
   LEFT JOIN `emp_dominant_provider_monthly` epd
     ON epd.community_id = cb.community_id
@@ -651,7 +791,10 @@ SELECT
   MAX(h.employee_name) AS employee_name,
   COALESCE(MAX(c.unified_employee_id), CONCAT('ADP:', h.associate_id)) AS unified_employee_id,
   COALESCE(MAX(c.em_employee_id), '') AS em_employee_id,
-  COALESCE(MAX(m.`Department Worked`), 'unmapped') AS dept_worked,
+  CASE
+    WHEN MAX(h.pay_code) = 'SALARIED' AND MAX(h.job_title_description) = 'Director of Nursing' THEN 'Nursing Staff'
+    ELSE COALESCE(MAX(m.`Department Worked`), 'unmapped')
+  END AS dept_worked,
   COALESCE(MAX(cb_twdd.community_name), MAX(h.community_name), MAX(m.`Community Worked In`), 'unmapped') AS community_worked_in,
   SUM(h.overlap_minutes) / 60.0 AS staff_hours_worked,
   SUM(h.total_pay * (h.overlap_minutes / NULLIF(h.punch_minutes, 0))) AS staff_labor_cost,
@@ -1184,6 +1327,44 @@ def build_actions() -> list[dict]:
             "recentVersionCutoffMs": 0,
             "tables": [{}],
         },
+        {
+            "type": "LoadFromVault",
+            "id": "load-emp-job-history",
+            "name": "emp_job_history",
+            "settings": {"preferredDatabaseEntityType": "TEMP_VIEW"},
+            "gui": {"x": 816, "y": 360, "color": None, "colorSource": None, "sampleJson": None},
+            "previewRowLimit": 10000,
+            "propagateAi": False,
+            "filterPolicy": "LEGACY",
+            "dataSourceId": "98dbcdce-0cef-423d-87e0-f241d7e91425",
+            "sourceType": "AUTO",
+            "executeFlowWhenUpdated": False,
+            "pseudoDataSource": False,
+            "truncateTextColumns": False,
+            "truncateRows": False,
+            "onlyLoadNewVersions": False,
+            "recentVersionCutoffMs": 0,
+            "tables": [{}],
+        },
+        {
+            "type": "LoadFromVault",
+            "id": "load-emp-pay-history",
+            "name": "emp_pay_history",
+            "settings": {"preferredDatabaseEntityType": "TEMP_VIEW"},
+            "gui": {"x": 912, "y": 360, "color": None, "colorSource": None, "sampleJson": None},
+            "previewRowLimit": 10000,
+            "propagateAi": False,
+            "filterPolicy": "LEGACY",
+            "dataSourceId": "7bc97874-de2d-42aa-974c-f689c9903f98",
+            "sourceType": "AUTO",
+            "executeFlowWhenUpdated": False,
+            "pseudoDataSource": False,
+            "truncateTextColumns": False,
+            "truncateRows": False,
+            "onlyLoadNewVersions": False,
+            "recentVersionCutoffMs": 0,
+            "tables": [{}],
+        },
         # Existing RA-only chain
         _sql_tile("sql-01-ra-punches", "ra_punches", ["load-punches"], 816, 48, SQL_01_RA_PUNCHES),
         _sql_tile("sql-02-ra-hourly", "ra_hourly", ["sql-01-ra-punches"], 912, 48, SQL_02_RA_HOURLY),
@@ -1192,7 +1373,7 @@ def build_actions() -> list[dict]:
         _sql_tile("sql-04-staff-punches", "staff_punches", ["load-punches"], 816, 200, SQL_04_STAFF_PUNCHES),
         _sql_tile("sql-05-staff-hourly", "staff_hourly", ["sql-04-staff-punches"], 912, 200, SQL_05_STAFF_HOURLY),
         _sql_tile("sql-07-comm-bridge", "comm_bridge", ["load-occ"], 912, 280, SQL_07_COMM_BRIDGE),
-        _sql_tile("sql-06-staff-detail", "staff_detail", ["sql-05-staff-hourly", "load-crosswalk", "load-dept-mapping", "sql-12-svc-by-employee", "sql-22-med-by-employee", "sql-07-comm-bridge", "sql-32-comm", "load-em-employees", "sql-51-emp-dominant-provider"], 1008, 200, SQL_06_STAFF_DETAIL),
+        _sql_tile("sql-06-staff-detail", "staff_detail", ["sql-05-staff-hourly", "load-crosswalk", "load-dept-mapping", "sql-12-svc-by-employee", "sql-22-med-by-employee", "sql-07-comm-bridge", "sql-32-comm", "load-em-employees", "sql-51-emp-dominant-provider", "sql-71-don-hourly"], 1008, 200, SQL_06_STAFF_DETAIL),
         # Existing service / med / revenue / census / community / sched-plan tiles
         _sql_tile("sql-10-svc-base", "svc_base", ["load-svc-recv"], 1104, 48, SQL_10_SVC_BASE),
         _sql_tile("sql-08-providers", "provider_dim", ["load-providers"], 1104, 280, SQL_08_PROVIDERS),
@@ -1209,6 +1390,9 @@ def build_actions() -> list[dict]:
         _sql_tile("sql-40-sched-plan", "sched_plan", ["load-sched-plan"], 1776, 48, SQL_40_SCHED_PLAN),
         _sql_tile("sql-50-residents-monthly", "svc_residents_monthly", ["sql-10-svc-base"], 1296, 280, SQL_50_RESIDENTS_MONTHLY),
         _sql_tile("sql-51-emp-dominant-provider", "emp_dominant_provider_monthly", ["sql-10-svc-base", "load-crosswalk", "sql-08-providers"], 1392, 280, SQL_51_EMP_DOMINANT_PROVIDER_MONTHLY),
+        # Salaried Director-of-Nursing synthetic punches (v5046)
+        _sql_tile("sql-70-don-dim", "don_dim", ["load-emp-job-history", "load-emp-pay-history"], 816, 440, SQL_70_DON_DIM),
+        _sql_tile("sql-71-don-hourly", "don_hourly", ["sql-70-don-dim", "sql-05-staff-hourly"], 912, 440, SQL_71_DON_HOURLY),
         # Final UNION
         _sql_tile(
             "sql-99-final",
