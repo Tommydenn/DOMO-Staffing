@@ -335,26 +335,35 @@ GROUP BY 1, 2, 3"""
 # ("Hayden Grove BL", "Caretta Senior Living Holmen") that don't match
 # comm_bridge directly.
 SQL_70_DON_DIM = """WITH salary_periods AS (
+  -- Only currently-active pay records (end date NULL/blank).
+  -- Historical "Active" records that have an end date represent prior
+  -- positions and would emit hours for date ranges where the person
+  -- has since moved or left.
   SELECT
     `Associate ID` AS associate_id,
     `Payroll Name` AS payroll_name,
     `Regular Pay Effective Date` AS pay_start,
-    NULLIF(`Regular Pay Effective End Date`, '') AS pay_end,
+    CAST(NULL AS DATE) AS pay_end,
     `Annual Salary` AS annual_salary_raw,
     `Job Class Code` AS class_code
   FROM `emp_pay_history`
   WHERE `Basis of Pay` = 'Salary'
+    AND (`Regular Pay Effective End Date` IS NULL
+         OR `Regular Pay Effective End Date` = '')
 ),
 job_positions AS (
+  -- Same filter on the job-history side: only currently-active.
   SELECT
     `Associate ID` AS associate_id,
     `Job Title Description` AS job_title,
     `Location Description` AS adp_location,
     `Position Effective Date` AS pos_start,
-    NULLIF(`Position Effective End Date`, '') AS pos_end
+    CAST(NULL AS DATE) AS pos_end
   FROM `emp_job_history`
   WHERE `Position Status` = 'Active'
     AND `Job Title Description` = 'Director of Nursing'
+    AND (`Position Effective End Date` IS NULL
+         OR `Position Effective End Date` = '')
 )
 SELECT
   s.associate_id,
@@ -367,7 +376,9 @@ SELECT
     WHEN p.adp_location = 'Caretta Senior Living Holmen' THEN 'Caretta Holmen'
     WHEN p.adp_location = 'Seven Hills Sr Living' THEN 'Seven Hills'
     WHEN p.adp_location = 'Talamore Sun Prairie WI' THEN 'Talamore Sun Prairie'
+    WHEN p.adp_location = 'Talamore SP -do not use' THEN 'Talamore Sun Prairie'
     WHEN p.adp_location = 'Talamore St Cloud-new' THEN 'Talamore St Cloud'
+    WHEN p.adp_location = 'Talamore St. Cloud' THEN 'Talamore St Cloud'
     WHEN p.adp_location = 'Glenn Buffalo Memory Care' THEN 'The Glenn Buffalo MC'
     WHEN p.adp_location = 'Minnetonka Orchard' THEN 'Orchards of Minnetonka'
     WHEN p.adp_location = 'The Glenn West St. Paul' THEN 'The Glenn W St Paul'
